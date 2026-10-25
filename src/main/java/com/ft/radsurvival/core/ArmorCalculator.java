@@ -23,10 +23,13 @@ import com.ft.radsurvival.config.PluginConfig;
  *       {@code PlayerInventory#getArmorContents()} 提取 Material 并按前缀归类。</li>
  * </ul>
  *
- * <p>默认权重：头盔 0.20 / 胸甲 0.40 / 护腿 0.30 / 靴子 0.10；
- * 默认系数：皮革 0.25、金/锁链 0.45、铁 0.70、钻石 0.85、下界合金 1.00
- * → 全套下界合金恰 1.0（完全免疫，§1.3）。数值合法性（∈[0,1]、材质键白名单）由
- * M1 {@link PluginConfig} 校验兜底，本类不重复校验；未知材质键按 0 处理。</p>
+ * <p>默认权重（v1.2）：头盔 0.12 / 胸甲 0.46 / 护腿 0.30 / 靴子 0.12（合计 1.00）；
+ * 默认系数（v1.2 全面削弱）：皮革 0.15、金/锁链 0.30、铁 0.48、钻石 0.60、下界合金 0.72
+ * → 全套满配减免分别为 15% / 30% / 48% / 60% / 72%。
+ * <b>旧口径「全套下界合金恰 1.0 = 完全免疫」已移除</b>：{@link PluginConfig} 校验会拒绝
+ * 任何「权重和 × 系数 ≥ 1.0」的组合；运行期另有 {@link #minDamageFraction} 最低杀伤保底，
+ * 双保险确保阳光永远无法被零封。数值合法性（∈[0,1]、材质键白名单）由
+ * {@link PluginConfig} 校验兜底，本类不重复校验；未知材质键按 0 处理。</p>
  */
 public final class ArmorCalculator {
 
@@ -91,7 +94,24 @@ public final class ArmorCalculator {
 
     /** 从类型安全配置装配（armor.slot-weights / armor.material-factors，§3）。 */
     public ArmorCalculator(PluginConfig config) {
-        this(config.armor().slotWeights(), config.armor().materialFactors());
+        this(config.armor());
+    }
+
+    /** 从盔甲配置段装配（v1.2：含 min-damage-fraction 最低杀伤保底）。 */
+    public ArmorCalculator(PluginConfig.ArmorConfig armorConfig) {
+        this(armorConfig.slotWeights(), armorConfig.materialFactors());
+        this.minDamageFraction = armorConfig.minDamageFraction();
+    }
+
+    /** 创建实例时的最低杀伤比例兜底默认值（与 config.yml 默认一致）。 */
+    private static final double DEFAULT_MIN_DAMAGE_FRACTION = 0.10;
+
+    /** 最低杀伤保底（v1.2）：无论减免多高，单轮伤害不低于基线的该比例。 */
+    private double minDamageFraction = DEFAULT_MIN_DAMAGE_FRACTION;
+
+    /** 最低杀伤保底比例（armor.min-damage-fraction）。 */
+    public double minDamageFraction() {
+        return minDamageFraction;
     }
 
     // ---------------------------------------------------------------- 纯内核
@@ -195,5 +215,33 @@ public final class ArmorCalculator {
     /** 适配层：直接对 armorContents 数组算减免（便于测试与复用）。 */
     public double reductionOf(ItemStack[] armorContents) {
         return reduction(slotMaterialsOf(armorContents));
+    }
+
+    // ------------------------------------------------- v1.2 最低杀伤保底
+
+    /**
+     * 把公式伤害抬到「最低杀伤保底」（v1.2 新增，取消完全免疫后的配套约束）。
+     *
+     * <p>语义：{@code finalDamage = max(公式伤害, 基线 × minDamageFraction)}，其中
+     * 「基线」= {@code base × timeFactor × corrosionMult}（即尚未乘 (1−减免) 的部分）。
+     * 这样即使服主把系数调到接近免疫，阳光也永远保有一份杀伤力。</p>
+     *
+     * <p>纯函数，无钳制副作用：{@code baseline <= 0}（如夜晚因子为 0）时原样返回，
+     * 不会凭空造出伤害。</p>
+     *
+     * @param damage   已乘过 (1−减免) 的公式伤害
+     * @param baseline 未乘减免的基线（base × timeFactor × corrosionMult）
+     */
+    public static double applyFloor(double damage, double baseline, double minDamageFraction) {
+        if (baseline <= 0.0) {
+            return damage;
+        }
+        double floor = baseline * RadiationMath.clampUnit(minDamageFraction);
+        return Math.max(damage, floor);
+    }
+
+    /** 实例形态：使用装配进来的 min-damage-fraction。 */
+    public double floor(double damage, double baseline) {
+        return applyFloor(damage, baseline, minDamageFraction);
     }
 }

@@ -23,6 +23,7 @@ import com.ft.radsurvival.core.RadiationServices;
 import com.ft.radsurvival.core.RadiationTask;
 import com.ft.radsurvival.core.RadiationTask.RoundOutcome;
 import com.ft.radsurvival.core.RadiationTask.RoundResult;
+import com.ft.radsurvival.item.DustCraftGui;
 
 /**
  * /rad 子命令路由 + TabComplete（plan.md §2 command/RadCommand.java）。
@@ -49,6 +50,9 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
     public static final String PERMISSION_ADMIN = "radsurvival.admin";
 
     private static final List<String> CORROSION_OPS = List.of("get", "set", "add");
+
+    /** v1.2 /rad dust 的动作（补全与校验共用）。 */
+    private static final List<String> DUST_OPS = List.of("list", "give", "help");
     private static final String DRY_RUN_FLAG = "--dry-run";
 
     private final RadSurvivalPlugin plugin;
@@ -75,6 +79,7 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
             case STATUS -> handleStatus(sender, args);
             case CHECK -> handleForceCheck(sender, args);
             case CORROSION -> handleCorrosion(sender, args);
+            case DUST -> handleDust(sender, args);
             case HELP -> sendHelp(sender, label, args.length >= 2 ? args[1] : null);
         }
         return true;
@@ -94,7 +99,32 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
             case STATUS, CHECK -> args.length == 2 ? filter(onlinePlayerNames(), args[1]) : List.of();
             case HELP -> args.length == 2 ? filter(visibleSubNames(sender), args[1]) : List.of();
             case CORROSION -> tabCorrosion(sender, args);
+            case DUST -> tabDust(sender, args);
         };
+    }
+
+    /** dust 分层补全：list|give|help → 档位 id → 玩家。 */
+    private List<String> tabDust(CommandSender sender, String[] args) {
+        if (args.length == 2) {
+            return filter(DUST_OPS, args[1]);
+        }
+        if (args.length == 3) {
+            String op = args[1].toLowerCase(Locale.ROOT);
+            return op.equals("give") ? filter(dustLevelIds(), args[2]) : List.of();
+        }
+        if (args.length == 4) {
+            return filter(onlinePlayerNames(), args[3]);
+        }
+        return List.of();
+    }
+
+    /** 配置里的档位 id（未就绪时退回内置四档，保证补全不会空手）。 */
+    private List<String> dustLevelIds() {
+        PluginConfig cfg = plugin.config();
+        if (cfg == null) {
+            return List.of("refined", "strong", "improved", "crude");
+        }
+        return cfg.antiDust().levels().stream().map(PluginConfig.DustLevel::id).toList();
     }
 
     /** corrosion 分层补全：op → 玩家 → 数值提示。 */
@@ -130,6 +160,9 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         List<String> names = new ArrayList<>();
         for (SubCommand sub : SubCommand.values()) {
             if (sub == SubCommand.CORROSION && !sender.hasPermission(PERMISSION_ADMIN)) {
+                continue;
+            }
+            if (sub == SubCommand.DUST && !sender.hasPermission(PERMISSION_ADMIN)) {
                 continue;
             }
             names.addAll(sub.allNames());
@@ -195,7 +228,8 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         PluginConfig.CorrosionConfig cor = cfg.corrosion();
 
         CommandOutput out = CommandOutput.of(sender,
-                "目标玩家", "世界", "生效维度", "昼夜阶段", "露天判定", "盔甲减免", "当前腐蚀", "本轮结果", "关键配置");
+                "目标玩家", "世界", "生效维度", "昼夜阶段", "露天判定", "盔甲减免", "最低杀伤",
+                "抗尘免疫", "当前腐蚀", "本轮结果", "关键配置");
         out.header("RadSurvival status");
 
         out.section("会话");
@@ -209,12 +243,24 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
                 + " §8timeFactor=§e" + CommandOutput.fixed(preview.timeFactor(), 3)
                 + "§8（smooth=" + cfg.smoothTransition() + "）");
         out.kv("露天判定", preview.exposed() ? "§e露天（头顶可见天空）" : "§a遮蔽/豁免维度（安全）");
-        out.kv("辐射等级", preview.exposed()
-                ? CommandOutput.exposureBar(preview.timeFactor())
-                    + " §8（HUD 同口径，按 timeFactor 取 ▲）"
-                : "§a● 安全 §8（遮蔽/豁免维度）");
+        int dustSeconds = services.dustImmunity().remainingSeconds(target.getUniqueId());
+        // v1.2：免疫在窗口内会盖掉等级条（与 HUD 的 ◆抗尘 同口径），
+        // 否则玩家在免疫中看到「▲▲▲▲▲」会以为马上要掉血。
+        out.kv("辐射等级", dustSeconds > 0
+                ? "§b" + cfg.antiDust().hudImmuneMark() + " §8（免疫窗口内，本轮零伤害、腐蚀不累积）"
+                : preview.exposed()
+                    ? CommandOutput.exposureBar(preview.timeFactor())
+                        + " §8（HUD 同口径，按 timeFactor 取 ▲）"
+                    : "§a● 安全 §8（遮蔽/豁免维度）");
+        // v1.2：护甲不再有「完全免疫」分支，改为展示「满配上限」与「最低杀伤保底」
+        // 注意 CommandOutput.percent 收「比例」（0.72 → "72%"），不要再乘 100
         out.kv("盔甲减免", "§e" + CommandOutput.percent(preview.armorReduction())
-                + (preview.armorReduction() >= 1.0 ? " §a(完全免疫)" : ""));
+                + " §8（最强材质满配上限 " + CommandOutput.percent(cfg.armor().maxFullSetReduction()) + "）");
+        out.kv("最低杀伤", "§e" + CommandOutput.percent(cfg.armor().minDamageFraction())
+                + " §8（护甲再厚也保底吃这一份）");
+        out.kv("抗尘免疫", dustSeconds > 0
+                ? "§b" + dustSeconds + "s §8（" + cfg.antiDust().hudImmuneMark() + "）"
+                : "§8—");
 
         out.section("腐蚀");
         out.kv("当前腐蚀", CommandOutput.corrosionBar(preview.corrosionAfter(),
@@ -432,6 +478,9 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
             if (sub == SubCommand.CORROSION && !sender.hasPermission(PERMISSION_ADMIN)) {
                 continue;
             }
+            if (sub == SubCommand.DUST && !sender.hasPermission(PERMISSION_ADMIN)) {
+                continue;
+            }
             visible.add(sub);
         }
         int width = 0;
@@ -474,6 +523,115 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         return String.join("，", pairs);
     }
 
+    // -------------------------------------------------------------------- dust
+
+    /**
+     * /rad dust &lt;list|give|help&gt;（v1.2 新增）。
+     *
+     * <p>三个动作的分工：{@code list} 看当前配置的档位表与作物归属（服主调参时的核对手段），
+     * {@code give} 直接把药水发给玩家（省去搭结构的调试成本），{@code help} 讲清结构怎么摆。</p>
+     */
+    private void handleDust(CommandSender sender, String[] args) {
+        PluginConfig cfg = plugin.config();
+        if (cfg == null) {
+            notReady(sender);
+            return;
+        }
+        if (!sender.hasPermission(PERMISSION_ADMIN)) {
+            sender.sendMessage("§c缺少权限：" + PERMISSION_ADMIN);
+            return;
+        }
+        String op = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
+        switch (op) {
+            case "help" -> {
+                sender.sendMessage("§6—— 抗尘埃药制作结构 ——");
+                for (String line : DustCraftGui.structureHelp()) {
+                    sender.sendMessage("  §7· §f" + line);
+                }
+                sender.sendMessage("  §8核心方块也接受投掷器；铁砧可用损坏/上蜡变体");
+            }
+            case "give" -> giveDust(sender, cfg, args);
+            case "list" -> listDust(sender, cfg);
+            default -> sender.sendMessage("§7用法: /rad dust <list|give|help>");
+        }
+    }
+
+    /** 列出档位表（按配置顺序 = 由强到弱）与认领的作物。 */
+    private void listDust(CommandSender sender, PluginConfig cfg) {
+        PluginConfig.AntiDustConfig dust = cfg.antiDust();
+        if (!dust.enabled()) {
+            sender.sendMessage("§7抗尘埃药当前为 §c关闭 §7状态（anti_dust.enabled=false）");
+            return;
+        }
+        sender.sendMessage("§6—— 抗尘埃药档位（由强到弱，取首个匹配）——");
+        for (PluginConfig.DustLevel level : dust.levels()) {
+            sender.sendMessage("  §f" + level.displayName() + " §8[" + level.id() + "]"
+                    + " §7−" + CommandOutput.fmt(level.corrosionReduction()) + "% §8/"
+                    + " §b" + level.immuneSeconds() + "s §8· §7作物 "
+                    + String.join(", ", level.items()));
+        }
+        sender.sendMessage("  §7冷却 §f" + dust.cooldownSeconds() + "s"
+                + " §7解毒 §f" + String.join(", ", dust.cures())
+                + " §7HUD §f" + dust.hudImmuneMark());
+    }
+
+    /** 发放药水：/rad dust give &lt;level&gt; [player]，level 支持档位 id 或物品名。 */
+    private void giveDust(CommandSender sender, PluginConfig cfg, String[] args) {
+        if (args.length < 3) {
+            sender.sendMessage("§7用法: /rad dust give <档位id> [player]");
+            return;
+        }
+        if (!cfg.antiDust().enabled()) {
+            sender.sendMessage("§c抗尘埃药未启用（anti_dust.enabled=false）");
+            return;
+        }
+        PluginConfig.DustLevel level = cfg.antiDust().levelById(args[2]);
+        if (level == null) {
+            // 容错：允许用品名/作物名来找档位（服主临时发放时更顺手）
+            level = cfg.antiDust().levelFor(args[2].toUpperCase(Locale.ROOT));
+        }
+        if (level == null) {
+            sender.sendMessage("§c未知档位：" + args[2] + " §7可选："
+                    + String.join("/", cfg.antiDust().levels().stream()
+                            .map(PluginConfig.DustLevel::id).toList()));
+            return;
+        }
+        Player target = resolveTargetForward(sender, args);
+        if (target == null) {
+            return;
+        }
+        com.ft.radsurvival.item.DustItemFactory factory = plugin.dustItems();
+        if (factory == null) {
+            sender.sendMessage("§c物品工厂未装配（插件可能尚未启用完成）");
+            return;
+        }
+        var overflow = target.getInventory().addItem(factory.create(level, 1));
+        for (var rest : overflow.values()) {
+            target.getWorld().dropItemNaturally(target.getLocation(), rest);
+        }
+        sender.sendMessage("§a已发放 §f" + level.displayName() + " §7→ §f" + target.getName());
+        if (!sender.equals(target)) {
+            target.sendMessage("§8[§a抗尘§8] §7你获得了一瓶 §f" + level.displayName());
+        }
+    }
+
+    /** dust give 的目标解析：玩家名在第 3 位而非第 1 位。 */
+    private Player resolveTargetForward(CommandSender sender, String[] args) {
+        if (args.length >= 4) {
+            Player target = Bukkit.getPlayer(args[3]);
+            if (target == null) {
+                sender.sendMessage("§c未找到在线玩家：" + args[3]);
+                return null;
+            }
+            return target;
+        }
+        if (sender instanceof Player player) {
+            return player;
+        }
+        sender.sendMessage("§c控制台执行必须指定玩家：/rad dust give <档位id> <player>");
+        return null;
+    }
+
     /** 未知子命令：给用法 + 最近似建议（避免「打错一个字全无反馈」）。 */
     private void unknownSub(CommandSender sender, String label, String token) {
         String suggestion = SubCommand.suggest(token);
@@ -505,7 +663,7 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§c插件未处于启用状态（配置非法或服务已停用）。");
     }
 
-    /** 状态徽标：✔ 已结算 / ◆ 免疫 / ● 安全 / ▲ 未结算。 */
+    /** 状态徽标：✔ 已结算 / ◆ 抗尘免疫 / ● 安全 / ▲ 未结算（v1.2：◆ 现在专指抗尘埃药窗口）。 */
     private static String verdictMark(RoundOutcome outcome) {
         return switch (outcome.result()) {
             case DAMAGED -> "§a✔";
@@ -519,9 +677,9 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
     private static String damageText(RoundOutcome preview) {
         return switch (preview.result()) {
             case DAMAGED -> "§e" + CommandOutput.fixed(preview.damage(), 3) + " §7点（预计本轮结算，未落地）";
-            case IMMUNE -> "§a0.000 §7（免疫：减免 ≥100%）";
+            case IMMUNE -> "§a0.000 §7（免疫：抗尘埃药窗口内，v1.2）";
             case COVERED -> "§a0.000 §7（遮蔽/豁免维度不受伤）";
-            case ZERO_DAMAGE -> "§a0.000 §7（公式伤害 ≤0）";
+            case ZERO_DAMAGE -> "§a0.000 §7（公式伤害 <= 0）";
             default -> "§7—  §7（本轮不结算）";
         };
     }

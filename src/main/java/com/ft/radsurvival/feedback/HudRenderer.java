@@ -30,8 +30,16 @@ public final class HudRenderer {
     public static final String LEVEL_OFF = "△";
     /** 遮蔽段。 */
     public static final String SAFE_MARK = "●安全";
-    /** 免疫段（减免 ≥1 且露天，替代等级格，§1.5/M3）。 */
+    /**
+     * 旧版「盔甲完全免疫」段（v1.2 已废弃：护甲不再能免疫）。
+     * 常量保留仅为兼容外部按字符串匹配的插件，正常情况下不会再出现在 HUD 上。
+     *
+     * @deprecated v1.2 起护甲最高减免 &lt; 100%，免疫只来自抗尘埃药，请改用 {@link #DUST_IMMUNE_MARK}.
+     */
+    @Deprecated(since = "1.2")
     public static final String IMMUNE_MARK = "◆免疫";
+    /** 抗尘埃药免疫段（v1.2 新增，替代旧的 ◆免疫，避免与「盔甲免疫」混淆）。 */
+    public static final String DUST_IMMUNE_MARK = "◆抗尘";
     /** 腐蚀条填充格。 */
     public static final String CORROSION_ON = "▓";
     /** 腐蚀条空格。 */
@@ -66,18 +74,22 @@ public final class HudRenderer {
     }
 
     /**
-     * 辐射等级条（着色）。优先级：遮蔽 → 免疫 → 比例格（§1.5）。
+     * 辐射等级条（着色）。优先级：遮蔽 → 抗尘埃药免疫 → 比例格（§1.5；v1.2 调整）。
+     *
+     * <p>v1.2 变更：原来「减免 ≥1.0 显示 ◆免疫」的分支已删除——护甲再也达不到 100%，
+     * 免疫改由抗尘埃药提供，用独立的 {@link #DUST_IMMUNE_MARK} 表示，避免玩家误以为
+     * 「穿甲就免疫」。</p>
      *
      * @param exposed        §1.1 露天判定（状态镜像值）
      * @param timeFactor     §1.2 昼夜因子（夜晚比例点亮依据）
-     * @param armorReduction §1.4 盔甲减免（≥1.0 = 免疫）
+     * @param dustImmune     v1.2 抗尘埃药免疫窗口是否生效
      */
-    public static String renderLevelBar(boolean exposed, double timeFactor, double armorReduction) {
+    public static String renderLevelBar(boolean exposed, double timeFactor, boolean dustImmune) {
         if (!exposed) {
             return COLOR_SAFE + SAFE_MARK;
         }
-        if (armorReduction >= 1.0) {
-            return COLOR_IMMUNE + IMMUNE_MARK;
+        if (dustImmune) {
+            return COLOR_IMMUNE + DUST_IMMUNE_MARK;
         }
         int lit = litLevelCells(timeFactor);
         StringBuilder sb = new StringBuilder();
@@ -88,6 +100,17 @@ public final class HudRenderer {
             sb.append(COLOR_DIM).append(repeat(LEVEL_OFF, LEVEL_CELLS - lit));
         }
         return sb.toString();
+    }
+
+    /**
+     * 兼容旧调用点的重载（v1.2 起 {@code armorReduction} 不再参与免疫判断）。
+     *
+     * @deprecated 请改用 {@link #renderLevelBar(boolean, double, boolean)}：护甲已无法免疫，
+     *             第三个参数请传免疫窗口状态。
+     */
+    @Deprecated(since = "1.2")
+    public static String renderLevelBar(boolean exposed, double timeFactor, double armorReduction) {
+        return renderLevelBar(exposed, timeFactor, false);
     }
 
     // ---------------------------------------------------------------- 腐蚀条
@@ -145,15 +168,30 @@ public final class HudRenderer {
     /**
      * actionbar 完整行：等级条 [SEPARATOR 腐蚀条]（{@code bossbarCorrosion=true} 时
      * 腐蚀条走 BossBar 常驻、actionbar 仅等级条，M3 新键口径）。
+     *
+     * @param dustImmune v1.2 抗尘埃药免疫窗口（替代旧的「减免 ≥1.0 免疫」）
      */
-    public static String renderActionBar(boolean exposed, double timeFactor, double armorReduction,
+    public static String renderActionBar(boolean exposed, double timeFactor, boolean dustImmune,
                                          double corrosion, double warnThreshold, double dangerThreshold,
                                          boolean bossbarCorrosion) {
-        String level = renderLevelBar(exposed, timeFactor, armorReduction);
+        String level = renderLevelBar(exposed, timeFactor, dustImmune);
         if (bossbarCorrosion) {
             return level;
         }
         return level + SEPARATOR + renderCorrosionBar(corrosion, warnThreshold, dangerThreshold);
+    }
+
+    /**
+     * 兼容旧签名的重载（v1.2：第三个参数不再参与免疫判断）。
+     *
+     * @deprecated 请改用带 {@code boolean dustImmune} 的重载。
+     */
+    @Deprecated(since = "1.2")
+    public static String renderActionBar(boolean exposed, double timeFactor, double armorReduction,
+                                         double corrosion, double warnThreshold, double dangerThreshold,
+                                         boolean bossbarCorrosion) {
+        return renderActionBar(exposed, timeFactor, false, corrosion, warnThreshold, dangerThreshold,
+                bossbarCorrosion);
     }
 
     /** 纯 ASCII 渲染辅助：重复符号 n 次（n≤0 返回空串）。 */

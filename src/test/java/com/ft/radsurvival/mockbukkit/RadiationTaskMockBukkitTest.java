@@ -86,8 +86,8 @@ class RadiationTaskMockBukkitTest {
     // ------------------------------------------------------ 免疫/遮蔽（零掉血零事件）
 
     @Test
-    @DisplayName("全套下界合金：零掉血、零事件、零累积（M4 口径；腐蚀 50 预值保持不动）")
-    void fullNetheriteIsFullyImmune() {
+    @DisplayName("v1.2 全套下界合金不再免疫：正常掉血、正常广播事件、腐蚀照常累积")
+    void fullNetheriteNoLongerImmune() {
         PlayerMock player = server.addPlayer("Tank");
         fixture.meter().setValue(player.getUniqueId(), 50.0);
         Support.equipFullSet(player, "NETHERITE");
@@ -95,11 +95,41 @@ class RadiationTaskMockBukkitTest {
 
         server.getScheduler().performTicks(40); // 2 轮
 
+        // 旧断言（零掉血/零事件/腐蚀不动）已反转：72% 减免只是减伤，不是免疫
+        assertThat(fixture.damages).hasSize(2);
+        assertThat(fixture.events).hasSize(2);
+        assertThat(player.getHealth()).isLessThan(20.0);
+        // armor-affects-accum=true → 累积速率 ×(1−0.72)=0.28，腐蚀仍会涨
+        assertThat(fixture.corrosion(player)).isGreaterThan(50.0);
+        // 每轮伤害 = base × 1.0 × mult × (1−0.72)；这里污染起始腐蚀为 50% → mult = 1.5
+        // → dmg = 1 × 1.0 × 1.5 × 0.28 = 0.42（先累后打，第二轮再略高）
+        assertThat(fixture.damages.get(0).amount()).isCloseTo(1.5 * (1 - 0.72), within(1e-3));
+        assertThat(fixture.damages.get(0).playerName()).isEqualTo("Tank");
+        // 第二轮腐蚀已涨（先累后打）→ mult>1 → 伤害略高于第一轮
+        assertThat(fixture.damages.get(1).amount()).isGreaterThan(fixture.damages.get(0).amount());
+    }
+
+    @Test
+    @DisplayName("v1.2 抗尘埃药免疫：窗口内零掉血零事件（唯一的免疫途径）")
+    void dustImmunitySuppressesDamage() {
+        PlayerMock player = server.addPlayer("Dusted");
+        fixture.meter().setValue(player.getUniqueId(), 50.0);
+        Support.resetCombat(fixture, server);
+
+        // 直接登记免疫窗口（绕开合成/服药链路，只验证结算链的免疫分支）
+        plugin.services().dustImmunity().grant(player.getUniqueId(), 30);
+
+        server.getScheduler().performTicks(40); // 2 轮
+
         assertThat(fixture.damages).isEmpty();
         assertThat(fixture.events).isEmpty();
         assertThat(player.getHealth()).isEqualTo(20.0);
-        // armor-affects-accum=true → 累积速率 ×(1−1.0)=0（先腐蚀步进口径，值不变）
-        assertThat(fixture.corrosion(player)).isEqualTo(50.0);
+
+        // 窗口手动结束后立刻恢复掉血（证明免疫是唯一抑制因素）
+        plugin.services().dustImmunity().clear(player.getUniqueId());
+        Support.resetCombat(fixture, server);
+        server.getScheduler().performTicks(20);
+        assertThat(fixture.damages).hasSize(1);
     }
 
     @Test
@@ -261,19 +291,24 @@ class RadiationTaskMockBukkitTest {
     }
 
     @Test
-    @DisplayName("钻石胸甲+铁护腿混合盔甲：减免按 Σ权重×系数 进入公式与镜像")
+    @DisplayName("v1.2 钻石胸甲+铁护腿混合盔甲：减免按 Σ权重×系数 进入公式（新系数 0.46×0.60 + 0.30×0.48）")
     void mixedArmorReduction() {
         PlayerMock player = server.addPlayer("HalfPlate");
         player.getInventory().setChestplate(new org.bukkit.inventory.ItemStack(
-                org.bukkit.Material.DIAMOND_CHESTPLATE)); // 0.40×0.85=0.34
+                org.bukkit.Material.DIAMOND_CHESTPLATE)); // v1.2: 0.46×0.60 = 0.276
         player.getInventory().setLeggings(new org.bukkit.inventory.ItemStack(
-                org.bukkit.Material.IRON_LEGGINGS));      // 0.30×0.70=0.21 → Σ=0.55
+                org.bukkit.Material.IRON_LEGGINGS));      // v1.2: 0.30×0.48 = 0.144 → Σ=0.42
         RoundOutcome outcome = fixture.task().settleRound(player);
-        assertThat(outcome.armorReduction()).isCloseTo(0.55, within(1e-9));
+        double expectedReduction = 0.46 * 0.60 + 0.30 * 0.48;
+        assertThat(outcome.armorReduction()).isCloseTo(expectedReduction, within(1e-9));
         assertThat(outcome.result()).isEqualTo(RoundResult.DAMAGED);
-        // 先累后打：本轮腐蚀 0→0.45%（rate=1×1×(1−0.55)）→ mult=1.0045 → dmg=1×1×1.0045×0.45
-        assertThat(outcome.corrosionAfter()).isCloseTo(0.45, within(1e-9));
-        assertThat(outcome.damage()).isCloseTo(1.0045 * (1 - 0.55), within(1e-9));
+        // 先累后打：本轮腐蚀 ≈ (1−0.42) = 0.58%（rate=1×1×(1−0.42)）→ mult 略大于 1 → dmg 贴近 0.58
+        double after = outcome.corrosionAfter();
+        assertThat(after).isCloseTo(1.0 * (1 - expectedReduction), within(1e-9));
+        double mult = com.ft.radsurvival.core.RadiationMath.corrosionMultiplier(
+                after, plugin.config().corrosion().maxMultiplier(),
+                plugin.config().corrosion().curve());
+        assertThat(outcome.damage()).isCloseTo(mult * (1 - expectedReduction), within(1e-9));
     }
 
     // ---------------------------------------------------------------- 每轮 PDC 同步（§2 抗崩溃）
@@ -295,8 +330,8 @@ class RadiationTaskMockBukkitTest {
                 .get(com.ft.radsurvival.core.CorrosionMeter.CORROSION_PDC_KEY,
                         org.bukkit.persistence.PersistentDataType.DOUBLE))
                 .isCloseTo(2.0, within(1e-9));
-        // 免疫短路轮（下界合金全套）：累积恒 0 变化 → 不再重复写 PDC（保持上值，写放大为零）
-        Support.equipFullSet(player, "NETHERITE");
+        // 豁免权限 → 完全不结算（腐蚀不步进、PDC 不动）——替代旧的「下界合金免疫」写法
+        player.addAttachment(plugin, "radsurvival.exempt", true);
         fixture.task().settleRound(player);
         assertThat(player.getPersistentDataContainer()
                 .get(com.ft.radsurvival.core.CorrosionMeter.CORROSION_PDC_KEY,

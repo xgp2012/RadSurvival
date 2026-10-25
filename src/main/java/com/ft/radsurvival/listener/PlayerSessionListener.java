@@ -84,6 +84,9 @@ public final class PlayerSessionListener implements Listener {
         CorrosionMeter meter = services.corrosionMeter();
         meter.onDeath(player.getUniqueId()); // §1.6 reset/decay 二选一
         meter.saveToPlayer(player);          // 立即持久化
+        // v1.2：死亡必须结束抗尘埃药免疫窗口，否则「喝药 → 自杀 → 复活」会带着
+        // 剩余的免疫时长继续免伤（DustImmunity 的注释也承诺了 quit/死亡都清）。
+        services.dustImmunity().clear(player.getUniqueId());
         var state = services.radiationTask().stateOf(player.getUniqueId());
         if (state != null) {
             state.setCorrosion(meter.get(player.getUniqueId())); // 镜像刷新

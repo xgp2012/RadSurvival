@@ -243,10 +243,11 @@ public final class FeedbackService implements Listener, Runnable, DamageApplier.
         double corrosion = live.corrosionAfter();
         boolean exposed = live.exposed();
         double timeFactor = live.timeFactor();
-        double reduction = live.armorReduction();
+        // v1.2：免疫只来自抗尘埃药窗口（护甲已无法免疫），直接从免疫服务取
+        boolean dustImmune = services.dustImmunity().isImmune(id);
 
         if (fb.actionbar()) {
-            String line = HudRenderer.renderActionBar(exposed, timeFactor, reduction, corrosion,
+            String line = HudRenderer.renderActionBar(exposed, timeFactor, dustImmune, corrosion,
                     cfg.corrosion().stageWarn(), cfg.corrosion().stageDanger(), fb.bossbarCorrosion());
             player.sendActionBar(line);
             actionbarSends.incrementAndGet();

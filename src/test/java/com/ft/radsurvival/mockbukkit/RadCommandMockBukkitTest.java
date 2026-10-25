@@ -80,17 +80,23 @@ class RadCommandMockBukkitTest {
     }
 
     @Test
-    @DisplayName("status 免疫与遮蔽原因可见：下界合金报免疫、exposed=false 报遮蔽")
-    void statusExplainsImmuneAndCovered() {
+    @DisplayName("status 遮蔽原因可见；v1.2 下界合金不再报免疫（护甲削弱后无此分支）")
+    void statusExplainsCoveredAndNoLongerImmune() {
         PlayerMock tank = server.addPlayer("Tank");
         tank.setOp(true);
-        Support.equipFullSet(tank, "NETHERITE");
-        tank.performCommand("rad status");
-        assertThat(join(drain(tank))).contains("完全免疫");
-
         fixture.exposed.set(false);
         tank.performCommand("rad status");
+        // 露天解析器给 false → 遮蔽分支（先验遮蔽，与免疫分支互斥）
         assertThat(join(drain(tank))).contains("遮蔽");
+
+        // 露天 + 全下界合金：不再出现「完全免疫」，而是正常结算伤害
+        fixture.exposed.set(true);
+        Support.equipFullSet(tank, "NETHERITE");
+        tank.performCommand("rad status");
+        String out = join(drain(tank));
+        assertThat(out).doesNotContain("完全免疫");
+        // 新口径展示满配上限（最强材质 72%）与最低杀伤保底（10%）
+        assertThat(out).contains("72%").contains("10%").contains("最低杀伤");
     }
 
     @Test
@@ -127,7 +133,7 @@ class RadCommandMockBukkitTest {
     }
 
     @Test
-    @DisplayName("force-check 免疫/跳过原因明确上报（创造模式与下界合金两种）")
+    @DisplayName("force-check 跳过/结算原因明确上报：创造模式免疫；v1.2 下界合金正常掉血")
     void forceCheckReportsSkipReasons() {
         PlayerMock admin = server.addPlayer("Why");
         admin.setOp(true);
@@ -137,11 +143,14 @@ class RadCommandMockBukkitTest {
         admin.performCommand("rad force-check CC");
         assertThat(join(drain(admin))).contains("创造/旁观模式无条件免疫");
 
+        // v1.2：全下界合金不再免疫 → 应真实掉血，且输出不含「完全免疫」
         PlayerMock tank = server.addPlayer("TT");
         Support.equipFullSet(tank, "NETHERITE");
+        Support.resetCombat(fixture, server);
         admin.performCommand("rad force-check TT");
-        assertThat(join(drain(admin))).contains("完全免疫");
-        assertThat(fixture.damages).isEmpty();
+        assertThat(join(drain(admin))).doesNotContain("完全免疫");
+        assertThat(fixture.damages).hasSize(1);
+        assertThat(tank.getHealth()).isLessThan(20.0);
     }
 
     // ---------------------------------------------------------------- corrosion

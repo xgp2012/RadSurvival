@@ -26,7 +26,7 @@ public final class RadiationMath {
         return Math.min(CORROSION_MAX, Math.max(CORROSION_MIN, value));
     }
 
-    /** 把比例值（盔甲减免等）钳到 [0,1]（§1.4：减免 ∈ [0,1]，1.0 = 完全免疫）。 */
+    /** 把比例值（盔甲减免等）钳到 [0,1]。注意：v1.2 起减免恒 < 1.0（配置校验拒绝任何 ≥1.0 的材质），\n     * 这里的 1.0 分支仅是内核防御网，不是可配置玩法。 */
     public static double clampUnit(double value) {
         return Math.min(1.0, Math.max(0.0, value));
     }
@@ -118,7 +118,7 @@ public final class RadiationMath {
 
     /**
      * §1.3 全参数便捷重载：内部先算 {@link #corrosionMultiplier} 再套用公式。
-     * armorReduction 在进公式前钳 [0,1]（1.0 = 完全免疫，伤害恒为 0，§1.3/§1.4）。
+     * armorReduction 在进公式前钳 [0,1]。v1.2 起该值不可能达到 1.0（配置层拒绝），\n     * 因此本函数不再产生「零伤害」——真正的零伤害只来自抗尘埃药免疫窗口（见 RadiationTask）。
      */
     public static double finalDamage(double base, double timeFactor, double corrosion,
                                      double armorReduction, double maxMultiplier, CorrosionCurve curve) {

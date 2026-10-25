@@ -18,7 +18,8 @@ import me.clip.placeholderapi.expansion.PlaceholderExpansion;
  *   <li>{@code %radsurvival_exposure%} —— 露天判定 0/1（§1.1）；</li>
  *   <li>{@code %radsurvival_reduction%} —— 盔甲减免百分比，两位小数（§1.4，如 40.00）；</li>
  *   <li>{@code %radsurvival_timemul%} —— 当前昼夜伤害因子（§1.2，两位小数，如 0.50）；</li>
- *   <li>{@code %radsurvival_corrosion%} —— 腐蚀值整数 [0,100]（§1.6 显示取整口径）。</li>
+ *   <li>{@code %radsurvival_corrosion%} —— 腐蚀值整数 [0,100]（§1.6 显示取整口径）；</li>
+ *   <li>{@code %radsurvival_dust%} —— 抗尘埃药免疫剩余秒数（v1.2；未在窗口内为 0）。</li>
  * </ul>
  *
  * <p><b>隔离</b>：{@code compileOnly} 依赖，本类只在 {@link PlaceholderBridge} 检测到
@@ -73,6 +74,8 @@ public final class RadSurvivalExpansion extends PlaceholderExpansion {
             case "corrosion" -> String.valueOf(
                     com.ft.radsurvival.feedback.HudRenderer
                             .corrosionDisplayPercent(api.getCorrosion(player)));
+            // v1.2 抗尘埃药免疫窗口：给计分板/计时器插件用（未免疫时为 0）
+            case "dust" -> String.valueOf(api.getImmunityRemainingSeconds(player));
             default -> null;
         };
     }

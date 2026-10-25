@@ -42,7 +42,7 @@ import com.ft.radsurvival.api.RadiationExposureEvent;
  * <p><b>取整口径</b>：不做任何取整/向上取整，直接把 §1.3 公式的浮点原值传入
  * {@code damage(double, ...)}（默认参数下半心 = 1.0 点，M4 无敌帧断言按每轮掉血 ≥1 点核对）。</p>
  *
- * <p>免疫短路（减免 ≥ 1.0 不广播事件、不掉血、不播反馈）与「先腐蚀后伤害」的顺序约束
+ * <p>免疫短路（v1.2 起唯一来源是抗尘埃药窗口：不广播事件、不掉血、不播反馈；\n * 旧的「减免 ≥ 1.0」通道已随护甲削弱移除）与「先腐蚀后伤害」的顺序约束
  * 由 {@link RadiationTask} 保证，本类只在需要真实结算时被调用。</p>
  */
 public final class DamageApplier {

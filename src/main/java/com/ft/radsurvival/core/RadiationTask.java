@@ -82,7 +82,7 @@ public final class RadiationTask implements Runnable {
         SKIPPED_EXEMPT,
         /** require-on-ground=true 且玩家不在地上 → 跳过（§1.3）。 */
         SKIPPED_NOT_ON_GROUND,
-        /** 减免 ≥ 1.0 → 完全免疫：不掉血、不发事件、不播反馈（§1.3）。 */
+        /** 抗尘埃药免疫窗口内（v1.2；旧口径「盔甲减免 ≥1.0 完全免疫」已随护甲削弱移除）。 */
         IMMUNE,
         /** 非露天（遮蔽或豁免维度）：本轮腐蚀恢复/不累积，零伤害（§1.1/§1.6）。 */
         COVERED,
@@ -101,7 +101,7 @@ public final class RadiationTask implements Runnable {
                 case SKIPPED_GAME_MODE -> "游戏模式不在 damage-game-modes，不结算（§1.3）";
                 case SKIPPED_EXEMPT -> "持有 radsurvival.exempt 豁免：不结算、不累积";
                 case SKIPPED_NOT_ON_GROUND -> "require-on-ground=true 且玩家未着地：跳过（§1.3）";
-                case IMMUNE -> "盔甲减免 ≥ 100%：完全免疫（不掉血、不发事件）";
+                case IMMUNE -> "抗尘埃药免疫窗口内：不掉血、不发事件（v1.2）";
                 case COVERED -> "非露天（遮蔽或豁免维度）：不受伤，腐蚀走恢复分支";
                 case ZERO_DAMAGE -> "公式伤害 ≤ 0：不结算";
                 case CANCELLED_BY_EVENT -> "RadiationExposureEvent 被取消/覆写为 ≤0：本轮不掉血";
@@ -134,6 +134,7 @@ public final class RadiationTask implements Runnable {
     private final ArmorCalculator armorCalculator;
     private final CorrosionMeter corrosionMeter;
     private final DamageApplier damageApplier;
+    private final DustImmunity dustImmunity;
 
     /** 玩家会话状态表（§2；主线程读写，ConcurrentHashMap 仅为测试可见性兜底）。 */
     private final Map<UUID, PlayerRadState> states = new ConcurrentHashMap<>();
@@ -149,7 +150,7 @@ public final class RadiationTask implements Runnable {
                          ArmorCalculator armorCalculator, CorrosionMeter corrosionMeter,
                          DamageApplier damageApplier) {
         this(plugin, config, sunExposureChecker, defaultResolver(sunExposureChecker),
-                dayNightProvider, armorCalculator, corrosionMeter, damageApplier);
+                dayNightProvider, armorCalculator, corrosionMeter, damageApplier, new DustImmunity());
     }
 
     /** 测试装配构造：露天判定经 {@link ExposureResolver} 注入（其余链路不变）。 */
@@ -158,6 +159,16 @@ public final class RadiationTask implements Runnable {
                          DayNightProvider dayNightProvider,
                          ArmorCalculator armorCalculator, CorrosionMeter corrosionMeter,
                          DamageApplier damageApplier) {
+        this(plugin, config, sunExposureChecker, exposureResolver, dayNightProvider,
+                armorCalculator, corrosionMeter, damageApplier, new DustImmunity());
+    }
+
+    /** 全参数构造（含 v1.2 抗尘埃药免疫窗口）。 */
+    public RadiationTask(RadSurvivalPlugin plugin, PluginConfig config,
+                         SunExposureChecker sunExposureChecker, ExposureResolver exposureResolver,
+                         DayNightProvider dayNightProvider, ArmorCalculator armorCalculator,
+                         CorrosionMeter corrosionMeter, DamageApplier damageApplier,
+                         DustImmunity dustImmunity) {
         this.plugin = plugin;
         this.config = config;
         this.sunExposureChecker = sunExposureChecker;
@@ -166,6 +177,12 @@ public final class RadiationTask implements Runnable {
         this.armorCalculator = armorCalculator;
         this.corrosionMeter = corrosionMeter;
         this.damageApplier = damageApplier;
+        this.dustImmunity = dustImmunity;
+    }
+
+    /** v1.2：抗尘埃药免疫窗口（结算链判断 + 命令/API 读取）。 */
+    public DustImmunity dustImmunity() {
+        return dustImmunity;
     }
 
     // -------------------------------------------------------------- 生命周期/调度
@@ -271,13 +288,23 @@ public final class RadiationTask implements Runnable {
         double armorReduction = armorCalculator.reductionOf(player);
 
         // —— ① 先腐蚀步进（elapsed = interval/20 秒；恢复分支同样走 step，§1.6）
+        //
+        //  v1.2 抗尘埃药免疫：免疫窗口内**必须真正冻结累积**，而不只是跳过伤害。
+        //  旧实现把免疫判定放在步进之后、只做提前 return —— 腐蚀照常上涨并落盘，
+        //  与「免疫」二字及 HUD 上那一段 ◆抗尘 直接矛盾（玩家看得见腐蚀条还在动）。
+        //  这里的做法：把「免疫」翻译成「本轮视作处于遮蔽」传给结算内核——
+        //  step() 在 exposed=false 时走的是**恢复**分支（−regen/s），于是免疫期间
+        //  腐蚀不涨反跌，与「躲进阴影」的既有语义完全一致，也不需要给内核加新参数。
+        //  注意顺序未被破坏：步进依旧发生在伤害计算之前（先累后打不变量仍然成立），
+        //  变的只是「本轮累积速率取什么值」。
         double corrosionBefore = currentCorrosion(player, id, apply);
         double corrosionAfter = corrosionBefore;
         PluginConfig.CorrosionConfig corrosionCfg = config.corrosion();
+        boolean dustImmune = dustImmunity.isImmune(player);
         if (apply && corrosionCfg.enabled()) {
             double elapsedSeconds = config.tickInterval() / TICKS_PER_SECOND;
             corrosionAfter = corrosionMeter
-                    .settle(id, exposed, timeFactor, armorReduction, elapsedSeconds)
+                    .settle(id, exposed && !dustImmune, timeFactor, armorReduction, elapsedSeconds)
                     .value();
             // §2 持久化口径：值有变化即同步 Player PDC（内存写、随 player.dat 落盘）——
             // 服务器崩溃/强杀不再丢最近结算的腐蚀值（旧实现只在 quit/death/reload 落盘）
@@ -296,8 +323,11 @@ public final class RadiationTask implements Runnable {
             state.setLastSettleStamp(System.currentTimeMillis());
         }
 
-        // —— ② 免疫短路：减免 ≥ 1.0 → 不掉血、不发事件、不播任何反馈（§1.3）
-        if (armorReduction >= 1.0) {
+        // —— ② 抗尘埃药免疫窗口（v1.2）：免疫期间零伤害、不发事件。
+        //    腐蚀已在 ① 以「不累积、按 regen 回落」的方式处理好（见该处注释）。
+        //    与旧的「盔甲减免 ≥1.0 完全免疫」是**不同**机制：后者已随 v1.2 护甲削弱被删除，
+        //    现在唯一能获得辐射免疫的途径就是服药，且有时限。
+        if (dustImmune) {
             if (apply && state != null) {
                 state.setLastDamage(0.0);
             }
@@ -318,8 +348,10 @@ public final class RadiationTask implements Runnable {
         double mult = corrosionCfg.enabled()
                 ? RadiationMath.corrosionMultiplier(corrosionAfter, corrosionCfg.maxMultiplier(), corrosionCfg.curve())
                 : 1.0;
-        double damage = RadiationMath.finalDamage(
-                config.baseDamage(), timeFactor, mult, armorReduction);
+        // 基线 = 尚未乘 (1−减免) 的部分；v1.2 最低杀伤保底以它为参照（见 ArmorCalculator#applyFloor）
+        double baseline = config.baseDamage() * timeFactor * mult;
+        double damage = armorCalculator.floor(
+                RadiationMath.finalDamage(config.baseDamage(), timeFactor, mult, armorReduction), baseline);
         if (damage <= 0.0) {
             if (apply && state != null) {
                 state.setLastDamage(0.0);

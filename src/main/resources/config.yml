@@ -40,12 +40,21 @@ transparent-blocks-count-as-cover: true
 async-exposure-scan: true
 
 # 盔甲减免模型：减免 = Σ(部位权重 × 材质系数)，空槽计 0（§1.4）
+#
+# ⚠ v1.2 全面削弱：旧口径「全套下界合金 = 1.00 = 完全免疫」已移除。
+#   现在任何盔甲都只能减伤、不能免伤，阳光始终保有最低杀伤力（见下方 min-damage）。
+#   旧值 → 新值：皮革 .25→.15、金/锁链 .45→.30、铁 .70→.48、钻石 .85→.60、下界合金 1.00→.72；
+#   部位权重 头盔 .20→.12、胸甲 .40→.46、护腿 .30→.30、靴子 .10→.12。
+#   全部材质「全套」满配减免：皮革 15% / 金·锁链 30% / 铁 48% / 钻石 60% / 下界合金 72%。
 armor:
-  # 部位权重，校验各值 ∈ [0,1]；默认头盔0.20/胸甲0.40/护腿0.30/靴子0.10
-  slot-weights: {helmet: 0.20, chestplate: 0.40, leggings: 0.30, boots: 0.10}
+  # 部位权重，校验各值 ∈ [0,1]；胸甲权重最高，符合「护住要害」的直觉
+  slot-weights: {helmet: 0.12, chestplate: 0.46, leggings: 0.30, boots: 0.12}
   # 材质系数，键必须属于 {LEATHER,GOLD,CHAINMAIL,IRON,DIAMOND,NETHERITE}，值 ∈ [0,1]
-  # 全套下界合金 = 1.00 恰好 100% 免疫
-  material-factors: {LEATHER: 0.25, GOLD: 0.45, CHAINMAIL: 0.45, IRON: 0.70, DIAMOND: 0.85, NETHERITE: 1.00}
+  # 校验要求：白名单内任一套装满配后 < 1.0（禁止任何材质通向完全免疫——v1.2 硬约束）
+  material-factors: {LEATHER: 0.15, GOLD: 0.30, CHAINMAIL: 0.30, IRON: 0.48, DIAMOND: 0.60, NETHERITE: 0.72}
+  # 最低杀伤保底：即使减免再高，单轮辐射伤害也不低于「base × timeFactor × 腐蚀倍率 × 本值」
+  # 校验 ∈ (0,1]。默认 0.10 = 最强防护下仍承受 10% 的阳光伤害，杜绝「穿甲挂机永不掉血」
+  min-damage-fraction: 0.10
 
 # 腐蚀条系统：露天随时间累积腐蚀度（0~100%），腐蚀越高辐射伤害越高（§1.6）
 corrosion:
@@ -55,7 +64,8 @@ corrosion:
   day-accum-per-sec: 1.0
   # 遮蔽/豁免维度时恢复速率 %/s（仅在线生效，离线冻结）
   regen-per-sec: 1.0
-  # 盔甲减免是否同时作用于累积速率（true = 全套下界合金既不累积也不掉血）
+  # 盔甲减免是否同时作用于累积速率（true = 重甲同时拖慢腐蚀累积速度）
+  # v1.2 默认系数下最高减免 72%，累积速率至少保留 28%（下界合金）
   armor-affects-accum: true
   # 腐蚀 100% 时的伤害倍率上限；校验 ≥ 1（0% ≈ ×1.0，100% ≈ ×maxMultiplier）
   max-multiplier: 2.0
@@ -88,3 +98,50 @@ feedback:
 commands:
   # /rad reload 所需权限节点（console 与持有该节点的玩家可执行）
   reload-permission: radsurvival.reload
+
+# =====================================================================
+# 抗尘埃药（v1.2 新增）
+# =====================================================================
+# 制作：往发射器（Dropper 亦可）周围一格摆一圈原木，把农作物放进发射器 UI 的「中心格」，
+# 再手持木棍右键发射器上方那格铁砧 → 产出一瓶对应档位的抗尘埃药。
+# 服用：吃掉后立刻降低腐蚀值，并进入一段时间的辐射免疫；同时获得一段使用冷却。
+anti_dust:
+  # 总开关：false = 不注册监听器，发射器行为退回原版
+  enabled: true
+  # 同一玩家两次服药的冷却秒数（校验 ≥ 0；0 = 无冷却）
+  # 注意：本插件不写原版 USE_COOLDOWN 组件，否则会与食物/药水共用全局冷却标签
+  cooldown-seconds: 20
+  # 服药瞬间无条件解除的中毒类效果（给「药」应有的可信度）
+  cures: [POISON, HUNGER, NAUSEA, WEAKNESS, SLOWNESS]
+  hud-immume-mark: "◆抗尘"
+  # 档位表：作物 → 档位。同一作物只取第一个匹配的档位（顺序 = 由强到弱）
+  # 未出现在任何档位里的物品 → 中心格拒收（GUI 提示「不是有效的抗尘埃原料」）
+  # reduction = 服药瞬间降低的腐蚀值（百分点，校验 (0,100]）
+  # immune-seconds = 免疫时长（秒，校验 ≥ 0）
+  # color = 该档位物品名的颜色与药水染色提示（HEX，校验 #RRGGBB）
+  # items 必须是合法物品枚举名，非法值启动即报错（禁止静默忽略）
+  levels:
+    refined:
+      display-name: 精制抗尘埃药
+      color: "#8FE3C4"
+      reduction: 50.0
+      immune-seconds: 30
+      items: [GOLDEN_CARROT, CHORUS_FRUIT, GLOW_BERRIES, ENCHANTED_GOLDEN_APPLE]
+    strong:
+      display-name: 强效抗尘埃药
+      color: "#63D19B"
+      reduction: 35.0
+      immune-seconds: 20
+      items: [NETHER_WART, CRIMSON_FUNGUS, WARPED_FUNGUS, SWEET_BERRIES]
+    improved:
+      display-name: 改良抗尘埃药
+      color: "#C8B560"
+      reduction: 25.0
+      immune-seconds: 15
+      items: [PUMPKIN, MELON_SLICE, SUGAR_CANE, COCOA_BEANS, BROWN_MUSHROOM, RED_MUSHROOM]
+    crude:
+      display-name: 粗制抗尘埃药
+      color: "#9AA35A"
+      reduction: 15.0
+      immune-seconds: 10
+      items: [WHEAT, CARROT, POTATO, BEETROOT, KELP, DRIED_KELP, BAMBOO, CACTUS]

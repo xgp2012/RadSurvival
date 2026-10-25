@@ -139,14 +139,25 @@ class RadiationExposureEventChainTest {
     }
 
     @Test
-    @DisplayName("免疫短路零事件：全下界合金下 RadiationExposureEvent 一次都不广播（§1.3 不播任何反馈的口径根基）")
-    void immuneNeverBroadcastsEvents() {
+    @DisplayName("v1.2 免疫零事件：抗尘埃药窗口内 RadiationExposureEvent 一次都不广播（不播任何反馈的根基）")
+    void dustImmuneNeverBroadcastsEvents() {
+        PlayerMock tank = server.addPlayer("Dusted");
+        Support.resetCombat(fixture, server);
+        plugin.services().dustImmunity().grant(tank.getUniqueId(), 30);
+        server.getScheduler().performTicks(20);
+        assertThat(fixture.events).isEmpty();
+        assertThat(tank.getHealth()).isEqualTo(20.0);
+    }
+
+    @Test
+    @DisplayName("v1.2 下界合金不再免疫：全下界合金下事件照常广播（旧「免疫短路」已删除）")
+    void fullNetheriteBroadcastsEventsAgain() {
         PlayerMock tank = server.addPlayer("Neri");
         Support.equipFullSet(tank, "NETHERITE");
         Support.resetCombat(fixture, server);
         server.getScheduler().performTicks(20);
-        assertThat(fixture.events).isEmpty();
-        assertThat(tank.getHealth()).isEqualTo(20.0);
+        assertThat(fixture.events).hasSize(1);
+        assertThat(tank.getHealth()).isLessThan(20.0);
     }
 
     @Test

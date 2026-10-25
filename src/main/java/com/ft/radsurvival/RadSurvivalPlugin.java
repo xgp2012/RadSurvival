@@ -14,6 +14,9 @@ import com.ft.radsurvival.config.PluginConfig;
 import com.ft.radsurvival.core.DamageApplier;
 import com.ft.radsurvival.core.RadiationServices;
 import com.ft.radsurvival.feedback.FeedbackService;
+import com.ft.radsurvival.item.DustCraftGui;
+import com.ft.radsurvival.item.DustItemFactory;
+import com.ft.radsurvival.listener.AntiDustListener;
 import com.ft.radsurvival.listener.DamageTagListener;
 import com.ft.radsurvival.listener.PlayerSessionListener;
 import com.ft.radsurvival.listener.RadiationMarkListener;
@@ -64,6 +67,15 @@ public class RadSurvivalPlugin extends JavaPlugin {
     /** 对外 API 门面（轻量包装，随取随用 services()）。 */
     private final RadSurvivalApi api = new RadSurvivalApi(this);
 
+    /** v1.2 抗尘埃药物品工厂（随配置重建；未启用/开关关闭时为 null）。 */
+    private volatile DustItemFactory dustItems;
+
+    /** v1.2 抗尘埃药合成界面（首次装配后复用同一实例，靠动态取配置跟随 reload）。 */
+    private volatile DustCraftGui dustGui;
+
+    /** v1.2 抗尘埃药服用结算监听器（同上）。 */
+    private volatile AntiDustListener antiDust;
+
     @Override
     public void onEnable() {
         // 首次运行：把 jar 内默认 config.yml 释放到插件数据文件夹
@@ -113,7 +125,11 @@ public class RadSurvivalPlugin extends JavaPlugin {
         newFeedback.start();
         PlaceholderBridge.registerIfAvailable(this);
 
+        // —— v1.2 抗尘埃药：合成台（发射器 UI + 木棍右键铁砧）与服用结算
+        installAntiDust(newServices);
+
         PluginConfig cfg = this.config;
+        int listenerCount = cfg.antiDust().enabled() ? 7 : 5;
         // 启动日志：3 行紧凑输出（装配 / 口径 / 增强），与 /rad status 控制台摘要同源（describeFlags）。
         // 旧版把维度/粒子/协议等键平铺成两行超长段落，管理员实际只关心「是否生效 + 关键旋钮」。
         getLogger().info("已启用 · " + newServices.describeFlags());
@@ -124,8 +140,67 @@ public class RadSurvivalPlugin extends JavaPlugin {
                 + " 死亡文案=" + (cfg.feedback().deathMessage() ? "on" : "off")
                 + " 红闪抑制=" + (newFeedback.enhancer() == null
                         ? "off（纯 Paper 原生）" : newFeedback.enhancer().label()));
-        getLogger().info("接线 · 监听器 5 个（会话/标记/伤害门控/反馈/死亡文案），在线玩家 "
+        getLogger().info("接线 · 监听器 " + listenerCount + " 个（会话/标记/伤害门控/反馈/死亡文案"
+                + (cfg.antiDust().enabled() ? "/抗尘埃药" : "") + "），在线玩家 "
                 + getServer().getOnlinePlayers().size() + " 名已预填，命令 /rad help 查看用法。");
+    }
+
+    /**
+     * v1.2 抗尘埃药装配：合成界面（{@link DustCraftGui}）+ 服用结算（{@link AntiDustListener}）。
+     *
+     * <p>为什么不在 onEnable 里内联写：reload 也要走同一条装配路径（新配置的档位表/冷却
+     * 必须换掉旧的监听器实例），抽成方法让「首启」与「reload」共用一份代码，
+     * 不会出现「只在首次启动生效」的漂移。</p>
+     *
+     * <p><b>旧的抗尘埃监听器必须先摘掉</b>：Bukkit 的 HandlerList 不支持按实例注销，
+     * 所以旧实例靠自身守卫失效——{@link DustCraftGui} 与 {@link AntiDustListener} 都从
+     * {@code plugin.config()} 动态取配置，旧实例在新配置下行为与新实例一致，
+     * 唯一副作用是同一事件被处理两次。因此本类的做法是：<b>首次注册后不再重复注册</b>，
+     * reload 只替换插件持有的工厂/监听器引用，让注册进来的那一份继续用新配置工作。</p>
+     */
+    private void installAntiDust(RadiationServices services) {
+        PluginConfig cfg = this.config;
+        DustItemFactory factory = new DustItemFactory(cfg);
+        this.dustItems = factory;
+        if (!cfg.antiDust().enabled()) {
+            // 关闭时必须把监听器真正摘掉，不能只靠「各自查配置后 return」失效：
+            // 那样玩家仍然能把发射器当免费 9 格仓库用（中心格随便放、外围随便堆、
+            // 漏斗自由灌入），与「关闭 = 退回原版」的承诺不符。
+            unregisterAntiDust();
+            this.dustGui = null;
+            this.antiDust = null;
+            return;
+        }
+        if (this.dustGui == null) {
+            // 首次装配：注册进 HandlerList（此后 reload 复用同一实例，不重复注册）
+            this.dustGui = new DustCraftGui(this, factory);
+            this.antiDust = new AntiDustListener(this);
+            getServer().getPluginManager().registerEvents(this.dustGui, this);
+            getServer().getPluginManager().registerEvents(this.antiDust, this);
+        } else {
+            // reload：同一实例继续服役（两者都动态取 plugin.config()），但要：
+            //  ① 清旧冷却（新配置的冷却秒数立即生效）；
+            //  ② 把 GUI 持有的 item factory 换成新的——否则 reload 改了档位表之后
+            //     「判定用新配置、产出用旧配置」，药水的 Lore/PDC 会与配置不符。
+            this.antiDust.clearCooldowns();
+            this.dustGui.rebind(factory);
+        }
+        getLogger().info("抗尘埃药 · " + cfg.antiDust().levels().size() + " 个档位（"
+                + cfg.antiDust().levels().stream().map(PluginConfig.DustLevel::id)
+                        .collect(java.util.stream.Collectors.joining("/"))
+                + "）· 冷却 " + cfg.antiDust().cooldownSeconds() + "s · "
+                + "结构 = 发射器 + 上方铁砧 + 一圈原木，木棍右键铁砧出品");
+    }
+
+    /** 把抗尘埃药的两个监听器从 HandlerList 摘掉（关闭开关时调用，可重复调用）。 */
+    private void unregisterAntiDust() {
+        if (this.dustGui != null) {
+            org.bukkit.event.HandlerList.unregisterAll(this.dustGui);
+        }
+        if (this.antiDust != null) {
+            org.bukkit.event.HandlerList.unregisterAll(this.antiDust);
+            this.antiDust.clearCooldowns();
+        }
     }
 
     @Override
@@ -179,6 +254,21 @@ public class RadSurvivalPlugin extends JavaPlugin {
     /** 对外 API 门面（M3/外部插件接线点；插件未启用时各方法安全降级）。 */
     public RadSurvivalApi api() {
         return api;
+    }
+
+    /** v1.2 抗尘埃药物品工厂（构建/识别药水；开关关闭或未启用时为 null）。 */
+    public DustItemFactory dustItems() {
+        return dustItems;
+    }
+
+    /** v1.2 抗尘埃药合成界面监听器（/rad 命令复用其合成入口；开关关闭为 null）。 */
+    public DustCraftGui dustGui() {
+        return dustGui;
+    }
+
+    /** v1.2 抗尘埃药服用结算监听器（命令读冷却用；开关关闭为 null）。 */
+    public AntiDustListener antiDustListener() {
+        return antiDust;
     }
 
     /**
@@ -242,6 +332,9 @@ public class RadSurvivalPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(newFeedback, this);
         newFeedback.start();
 
+        // v1.2：抗尘埃药物品工厂换新配置（监听器实例复用，档位表/冷却经 config() 动态生效）
+        installAntiDust(fresh);
+
         // 占位符重注册（判定链路强化修复）：旧 expansion 持有旧插件引用且 persist()=true，
         // 不重注册会让 %radsurvival_*% 在 reload 后继续按旧装配/旧版本号应答。
         PlaceholderBridge.registerIfAvailable(this);
@@ -249,7 +342,9 @@ public class RadSurvivalPlugin extends JavaPlugin {
         getLogger().info("config.yml reload 成功 · " + fresh.describeFlags()
                 + " · 反馈层 HUD=" + (this.config.feedback().actionbar() ? "on" : "off")
                 + "/bossbar=" + (this.config.feedback().bossbarCorrosion() ? "on" : "off")
-                + "/protocol-lib=" + this.config.feedback().protocolLib());
+                + "/protocol-lib=" + this.config.feedback().protocolLib()
+                + " · 抗尘埃药=" + (this.config.antiDust().enabled()
+                        ? this.config.antiDust().levels().size() + " 档" : "off"));
         return List.of();
     }
 }

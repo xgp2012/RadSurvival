@@ -37,20 +37,32 @@ class HudRendererTest {
         }
 
         @Test
-        @DisplayName("符号与段：白天 ▲▲▲▲▲ / 夜晚 ▲▲△△△ / 遮蔽 ●安全 / 免疫 ◆免疫")
+        @DisplayName("符号与段：白天 ▲▲▲▲▲ / 夜晚 ▲▲△△△ / 遮蔽 ●安全 / 抗尘免疫 ◆抗尘（v1.2）")
         void segmentsMatchPlanSample() {
-            assertThat(HudRenderer.renderLevelBar(true, 1.0, 0.0))
+            assertThat(HudRenderer.renderLevelBar(true, 1.0, false))
                     .isEqualTo("§6▲▲▲▲▲");
-            assertThat(HudRenderer.renderLevelBar(true, 0.5, 0.0))
+            assertThat(HudRenderer.renderLevelBar(true, 0.5, false))
                     .isEqualTo("§6▲▲§8△△△");
-            assertThat(HudRenderer.renderLevelBar(false, 1.0, 0.0))
+            assertThat(HudRenderer.renderLevelBar(false, 1.0, false))
                     .isEqualTo("§a●安全");                                   // 遮蔽优先于其他段
-            assertThat(HudRenderer.renderLevelBar(true, 1.0, 1.0))
-                    .isEqualTo("§b◆免疫");                                   // 免疫（≥1）替代等级格（M3 口径）
-            assertThat(HudRenderer.renderLevelBar(false, 0.5, 1.0))
+            // v1.2：免疫来自抗尘埃药，不再是盔甲减免 ≥1.0
+            assertThat(HudRenderer.renderLevelBar(true, 1.0, true))
+                    .isEqualTo("§b◆抗尘");
+            assertThat(HudRenderer.renderLevelBar(false, 0.5, true))
                     .isEqualTo("§a●安全");                                   // 遮蔽时免疫段让位安全段
-            assertThat(HudRenderer.renderLevelBar(true, 0.0, 0.5))
+            assertThat(HudRenderer.renderLevelBar(true, 0.0, false))
                     .isEqualTo("§8△△△△△");                                   // 全灭格（night-multiplier=0 极端配置）
+        }
+
+        @Test
+        @DisplayName("v1.2 护甲减免不再产生免疫：旧签名 renderLevelBar(...,1.0) 退化为普通等级格")
+        @SuppressWarnings("deprecation")
+        void armorReductionNoLongerGrantsImmunityText() {
+            // 旧调用点传 1.0 也不会再显示 ◆免疫——护甲削弱后这本就不可能发生，
+            // 兼容重载必须明确退化为等级格，避免历史调用静默显示「免疫」骗玩家。
+            assertThat(HudRenderer.renderLevelBar(true, 1.0, 1.0)).isEqualTo("§6▲▲▲▲▲");
+            assertThat(HudRenderer.IMMUNE_MARK).isEqualTo("◆免疫"); // 常量仅为外部兼容保留
+            assertThat(HudRenderer.DUST_IMMUNE_MARK).isEqualTo("◆抗尘");
         }
     }
 

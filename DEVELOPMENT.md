@@ -12,7 +12,7 @@
 
 | 顺序 | 做什么 | 耗时 |
 |---|---|---|
-| 1 | 跑通 `mvn -B clean package`，确认 **188 条全绿** | ~2 min |
+| 1 | 跑通 `mvn -B clean package`，确认 **265 条全绿** | ~2 min |
 | 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
 | 3 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
 | 4 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
@@ -31,11 +31,11 @@
 | 语言/JDK | Java **21**（`maven.compiler.release=21`） |
 | 构建 | Maven 3.10+，JDK 21（本机验证：`D:\java21`，Azul Zulu 21.0.12.1） |
 | 产物 | 自包含 fat jar，约 1.8 MB，内嵌库已 relocate 到 `com.ft.radsurvival.lib.*` |
-| 测试规模 | **188 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
+| 测试规模 | **265 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
 | NMS | **零依赖**（纯 Bukkit/Paper API） |
 
-**一句话架构**：`config` 解析并校验 → `core` 六单例承载全部纯逻辑 → `RadiationTask` 每
-`tick-interval` 跑一轮 → `feedback` 负责表现 → `api` 对外收敛读写。
+**一句话架构**：`config` 解析并校验 → `core` 七单例承载全部纯逻辑 → `RadiationTask` 每
+`tick-interval` 跑一轮 → `feedback` 负责表现 → `item` 承载抗尘埃药 → `api` 对外收敛读写。
 
 ---
 
@@ -44,34 +44,62 @@
 ```
 com.ft.radsurvival
 ├── RadSurvivalPlugin      插件入口：装配、reload、onDisable（薄壳，不含业务逻辑）
-├── SubCommand / RadCommand / CommandOutput   命令层（路由 / 别名 / 权限 / 排版）
+├── command/               命令层
+│   ├── SubCommand          子命令枚举（路由表 / 别名 / 权限）
+│   ├── RadCommand          /rad 各分支实现（status / dust / reload …）
+│   └── CommandOutput       统一排版（fixed / percent / trim）
 ├── config/
 │   ├── PluginConfig       纯 Java 配置模型 + 全量校验（不依赖 Bukkit 服务）
-│   └── (内部 record)      ArmorConfig / CorrosionConfig / FeedbackConfig / CommandsConfig
+│   └── (内部 record)      ArmorConfig / CorrosionConfig / FeedbackConfig /
+│                          CommandsConfig / AntiDustConfig / DustLevel
 ├── core/                  ★ 判定与结算内核（可纯单元测试）
 │   ├── RadiationMath      伤害/累积/倍率/曲线的纯函数（单调有界）
 │   ├── DayNightProvider   昼夜阶段与 timeFactor（含线性插值）
 │   ├── ArmorCalculator    部位权重 × 材质系数 → 减免率
+│   │                      + applyFloor() 最低杀伤保底（v1.2）
+│   ├── DustImmunity       ★ 抗尘埃药免疫窗口（注入时钟，v1.2）
 │   ├── SunExposureChecker 露天判定（段缓存 + 异步补扫 + 粘滞层）
 │   ├── CorrosionMeter     腐蚀值权威存储（内存）+ PDC 持久化 + 阶段回调
 │   ├── DamageApplier      事件广播 + 真实掉血（唯一伤害出口）
-│   ├── RadiationTask      主循环：过滤链 → 判定 → 腐蚀步进 → 伤害
+│   ├── RadiationTask      主循环：过滤链 → 判定 → 腐蚀步进 → 免疫 → 伤害
 │   ├── PlayerRadState     单玩家结算镜像（HUD/调试读口）
-│   └── RadiationServices  六单例容器（reload 时整体重建）
-├── feedback/              表现层（HUD 双条 / 阶段播报 / 粒子音效 / BossBar / 红闪抑制）
-├── listener/              5 个监听器，职责严格分离：
-│   ├── PlayerSessionListener    join/quit/death：状态预填、PDC 落盘、离线清理
+│   └── RadiationServices  七单例容器（reload 时整体重建）
+├── item/                  ★ 抗尘埃药（v1.2）
+│   ├── DustItemFactory    物品构建 + PDC 档位标识 + 档位反查
+│   ├── DustCraftStructure 多方块结构判定（发射器 + 上方铁砧 + 8 邻原木）
+│   └── DustCraftGui       ★ 合成界面与触发（木棍右键铁砧 / 容器使用约束）
+├── feedback/              表现层
+│   ├── FeedbackService     HUD 双条 / 阶段播报 / 粒子音效 / BossBar（兼作受击监听器）
+│   ├── HudRenderer         纯字符串渲染（等级条 / 腐蚀条 / ◆抗尘 标记，可纯单测）
+│   ├── HurtFlashEnhancer   红闪抑制抽象（无协议库时的降级实现）
+│   └── ProtocolLibHurtFlashEnhancer  红闪抑制（检测到 ProtocolLib 时启用）
+├── listener/              5 个常驻监听器（+ 开启抗尘埃药时追加 2 个，共 7 个）：
+│   ├── PlayerSessionListener    join/quit/death：状态预填、PDC 落盘、离线清理、清免疫
 │   ├── RadiationMarkListener    在事件瞬态 PDC 打 radsurvival:source=radiation 标记
 │   ├── SunRadiationListener     ★伤害门控：SunMark 时间窗 + classify 认领太阳伤害
 │   │                            + restoreVanillaDefense 补偿外部伤害的原版减免
 │   ├── DamageTagListener        死亡文案：时间窗 + GENERIC 无实体双判据
-│   └── (FeedbackService 兼作监听器) 受击反馈挂点
+│   └── AntiDustListener         ★服药结算：降腐蚀 + 免疫 + 解毒 + 冷却（v1.2）
 ├── placeholder/           PlaceholderAPI 扩展（缺失时零加载）
-└── api/                   对外扩展点（事件 + 门面）
+│   ├── PlaceholderBridge      软依赖桥（无 PAPI 时零开销）
+│   └── RadSurvivalExpansion   %radsurvival_*% 占位符实现
+└── api/                   对外扩展点
+    ├── RadiationExposureEvent    每轮辐射结算前后可介入
+    ├── CorrosionStageChangeEvent 腐蚀阶段跳变广播
+    └── RadSurvivalApi            只读者门面
 ```
 
-> 注册顺序在 `RadSurvivalPlugin#onEnable`，共 5 处 `registerEvents`。
+> `DustCraftGui` 虽在 `item/` 包，但它实现了 `Listener` 并注册进 HandlerList，
+> 所以那「7 个监听器」= `listener/` 里 4 个 + `FeedbackService` + `item/DustCraftGui` + `AntiDustListener`。
+
+> 注册顺序在 `RadSurvivalPlugin#onEnable`：基础 5 处 `registerEvents`，再经
+> `installAntiDust()` 追加 2 个（`DustCraftGui` + `AntiDustListener`），共 7 个。
 > **SunRadiationListener 必须用 LOWEST 优先级**——它要先于第三方插件看到原始伤害值。
+>
+> **抗尘埃药的监听器只在首次装配时注册一次**：`installAntiDust()` 在 reload 路径上复用同一实例
+> （两个类都从 `plugin.config()` 动态取配置，因此自动跟随新配置），只清掉旧冷却。
+> 不要改成「每次 reload 都 registerEvents」——Bukkit 的 `HandlerList` 不支持按实例注销，
+> 重复注册会让同一事件被处理多次。
 
 **分层铁律**
 
@@ -93,8 +121,10 @@ RadiationTask.run()
        ├─ ③ 露天判定（SunExposureChecker，安全区 → 恢复分支）
        ├─ ④ 盔甲减免（ArmorCalculator，Σ 部位权重 × 材质系数）
        ├─ ⑤ 腐蚀步进（先累后打；值域钳 [0, max]）
-       ├─ ⑥ 伤害合成：base × timeFactor × corrosionMult × (1 − armorReduction)
-       └─ ⑦ DamageApplier.apply(...) → RadiationExposureEvent → damage()
+       ├─ ⑥ 抗尘埃药免疫窗口（DustImmunity → IMMUNE，跳过 ⑦⑧）
+       ├─ ⑦ 伤害合成：max(base × timeFactor × corrosionMult × (1 − armorReduction),
+       │                    base × timeFactor × corrosionMult × minDamageFraction)
+       └─ ⑧ DamageApplier.apply(...) → RadiationExposureEvent → damage()
 ```
 
 **三条口径（改动前必读）**
@@ -102,6 +132,11 @@ RadiationTask.run()
 1. **先累后打**：腐蚀步进发生在伤害计算**之前**，本轮累加的腐蚀立刻计入倍率。
 2. **无敌帧**：`tick-interval ≥ 20`（`PluginConfig` 校验下限），否则伤害会被原版无敌帧吞掉。
 3. **不双重减免**：见 §10.3 —— 由「结算瞬间摘甲」保证，而非依赖伤害类型。
+
+> **v1.2 变化**：⑥ 之前有一级「`armorReduction >= 1.0` → IMMUNE」短路，已删除。
+> 现在 `RoundResult.IMMUNE` 的唯一来源是 ⑥ 的抗尘埃药窗口；护甲只能减伤，且被 ⑦ 的保底兜住。
+> 免疫判定刻意放在 ⑤ **之后**——先累后打的口径不能因为免疫而松动（腐蚀照常在免疫窗口外累积，
+> 窗口内则完全不步进，避免「喝药期间偷偷攒腐蚀」和「喝药反而被腐蚀」两种观感都不对）。
 
 ---
 
@@ -212,7 +247,7 @@ Bukkit 的 `DamageCause.CUSTOM` **无法反查来源**，而 `/damage <p> 10 min
 ```
 src/test/java/com/ft/radsurvival/
 ├── config/    PluginConfigValidation 等（纯 Java，无需服务器）
-├── core/      RadiationMath / DayNight / Armor / Corrosion / SunExposure（纯内核）
+├── core/      RadiationMath / DayNight / Armor / Corrosion / SunExposure / DustImmunity（纯内核）
 ├── feedback/  HudRenderer 纯函数
 ├── listener/  SunRadiationListenerTest（伤害通道归因纯内核）
 └── mockbukkit/ 集成测试（MockBukkit 4.116.3，包 org.mockbukkit.mockbukkit）
@@ -221,7 +256,7 @@ src/test/java/com/ft/radsurvival/
 ```powershell
 $env:JAVA_HOME='D:\java21'
 $env:MAVEN_OPTS='-Duser.language=en -Dfile.encoding=UTF-8'   # 避免 GBK 下中文编译错误
-mvn -B clean package            # 全量（188 条）
+mvn -B clean package            # 全量（265 条）
 mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 ```
 
@@ -236,6 +271,19 @@ mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 - `RadSurvivalPlugin` **不能加 `final`**：MockBukkit 用 byte-buddy 子类化插件实例做装载钩子，
   `final` 会被拒（"Cannot subclass ... final types"）。
 - TabComplete 直接构造 `new RadCommand(plugin)` 断言，不依赖 mock 的 TabCompleter 存取。
+- **`org.bukkit.Tag` 在纯 JUnit 下不可用**：其静态初始化要 Bukkit 注册表，无服务器时抛
+  `ExceptionInInitializerError`。任何走 `Tag.ANVIL` / `Tag.LOGS` 的判定（如
+  `DustCraftStructure.isAnvil`）**必须放 `mockbukkit/`**，不能按「纯函数」归类。
+  这是把 `DustCraftStructureTest` 从 `item/` 挪到 `mockbukkit/DustCraftStructureMockBukkitTest` 的原因。
+- **方块容器必须走实时 `BlockInventoryHolder`**：`block.getState()` 返回的是**快照**，
+  对它 `getInventory().setItem(...)` 后再 `update()` 在 MockBukkit 里不可靠，
+  且生产代码「读中心格 → 写回剩余数量」需要作用于同一份实时容器。
+  统一用 `DustCraftStructure.inventoryOf(block)`（内部优先 `BlockInventoryHolder`）。
+  测试里也走同一个方法，这样测试与生产是同一路径。
+- `ItemMeta#displayName()` 的纯文本序列化在 MockBukkit 里会带方括号包裹，
+  断言用 `contains("名称")` 而非 `isEqualTo`。
+- `Consumable` 的组件读取方法是 `consumeEffects()`（不是 `effects()`），可用 `javap` 复核：
+  `javap -cp target/api-check io.papermc.paper.datacomponent.item.Consumable`。
 
 ### 8.3 新增测试的约定
 
@@ -255,7 +303,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 
 **发布检查单**
 
-1. `mvn -B clean package` → `Tests run: 188, Failures: 0`
+1. `mvn -B clean package` → `Tests run: 265, Failures: 0`
 2. 产物大小约 1.8 MB；jar 内 `com/ft/radsurvival/lib/*` ≥ 1259 项；
    `org/spongepowered/*`、`com/github/benmanes/*` **零泄漏**；
 3. 内嵌 `config.yml` 与 `src/main/resources/config.yml` **逐字节一致**；
@@ -279,6 +327,10 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | **原版护甲二次减免（v1.1 修复）** | GENERIC **走**护甲减免（旧验收用裸僵尸测出的"不吃甲"是空甲巧合）→ 双重减免 + 安全区伤害被吞成 0。改为结算瞬间摘甲/还甲 + 太阳伤害门控，详见 10.3 |
 | **reload 泄漏与占位符（v1.1 修复）** | 旧 `FeedbackService` 的容器阶段回调与 `DamageApplier` 挂点未解绑；`PlaceholderBridge` 从不重注册 → 见 10.3 |
 | **`PlayerLoginEvent` 的能力代价** | 任何插件监听它都会让 Paper 打印 `[HorriblePlayerLoginEventHack]` 并使 re-configuration API 失效 → **本项目刻意不监听**；异步登录阶段触达玩家状态会触发线程断言 |
+| **`getState()` 是快照（v1.2 踩坑）** | 对 `block.getState()` 的容器 `setItem` 后 `update()` 不保证生效，且「读中心格→写回剩余」会互相覆盖。容器读写统一走 `BlockInventoryHolder#getInventory()`（`DustCraftStructure.inventoryOf`） |
+| **`org.bukkit.Tag` 需注册表（v1.2 踩坑）** | 纯 JUnit 下 `Tag.ANVIL` 静态初始化直接 `ExceptionInInitializerError`。用 Tag 的判定只能放 `mockbukkit/` 测 |
+| **`CommandOutput.percent` 收的是比例** | 传 `0.72` 输出 `72%`；早期误乘 100 导致 `/rad status` 印出 `7200%`（测试抓到） |
+| **原版 `USE_COOLDOWN` 不能写在自定义药水上** | 它的冷却分组是原版共享的，写进去会和原版食物/药水互相卡冷却。冷却靠取消 `PlayerItemConsumeEvent`（取消不掉物品）自管 |
 | **构建混淆（ProGuard）** | **不可行，已放弃**，详见下节 |
 
 ### 10.1 为什么不做混淆（重要，勿重复尝试）
@@ -387,6 +439,32 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | 验收环境的回血干扰 | `difficulty peaceful` 或饱食度满时自然回血 ≈1HP/0.7s，血量读数会把伤害盖掉；测血量差必须切 `difficulty hard` 或先在 <1s 内完成读数 |
 | `gamerule` 名称 | 实测该环境只认下划线形式（`keep_inventory` ✓，`keepInventory` ✗），别只照着 wiki 写 camelCase |
 
+### 10.4 v1.2 抗尘埃药（结构 + 物品 + 免疫，本轮踩坑）
+
+需求是「发射器上放铁砧，用木棍右键铁砧当合成工具，发射器 UI 作为合成页」。
+以下是实现时**实际踩到**的坑，改这块之前先读一遍。
+
+| 坑 | 事实与结论 |
+|---|---|
+| **这不是配方，是多方块结构** | 用户明确否掉了「数据包 JSON 配方」和「工作台」。`DustCraftStructure` 判的是**世界里真实方块**：核心（发射器/投掷器）+ 正上方铁砧 + 同层 8 邻原木。别改回 `RecipeChoice` 思路 |
+| **「9 格外围一圈中间农作物」指的是容器 UI，不是世界方块** | 8 个原木是世界结构；GUI 里那 9 格是发射器自己的 `Inventory`，外围 8 格只做展示（放置会被拒），中心索引 `4` 才是作物位 |
+| **`block.getState()` 返回快照** | 对它 `getInventory().setItem(...)` 再 `update()` 在本环境下不可靠；且「读中心格 → 写回剩余数量」若分两次拿快照会互相覆盖。统一用 `BlockInventoryHolder#getInventory()`（封装成 `DustCraftStructure.inventoryOf`） |
+| **`Tag.ANVIL` / `Tag.LOGS` 需要 Bukkit 注册表** | 纯 JUnit 下静态初始化直接抛 `ExceptionInInitializerError`。用 Tag 的判定只能放进 `mockbukkit/` 测（`DustCraftStructureMockBukkitTest`） |
+| **`org.bukkit.Tag` 的常量名** | 是 `Tag.LOGS`，不是 `Tag.ITEMS_LOGS`（后者不存在）。`Material` 是普通 enum 且实现 `Keyed`，但**不是** `ItemType`，需要时用 `material.asItemType()` |
+| **不能给自定义物品注册新 ID** | Bukkit/数据包都不允许插件造新物品。抗尘埃药 = `HONEY_BOTTLE` 基底 + PDC 档位标识（`radsurvival:dust_level`）+ 组件覆盖外观与行为 |
+| **`USE_COOLDOWN` 不要写** | 它的冷却分组是原版共享的，写进去会与原版食物/药水互相卡冷却。插件的 20s 冷却靠**取消 `PlayerItemConsumeEvent`** 实现——Bukkit 取消该事件**不扣物品**，于是「冷却中喝不掉且不亏东西」自然成立 |
+| **`CONSUMABLE` 要写、但 `consumeEffects` 留空** | 写它是为了拿到原版饮用动作（动画/音效/扣物品）；效果列表必须空，否则绕过冷却与降腐蚀逻辑 |
+| **`Consumable` 的读口是 `consumeEffects()`** | 不是 `effects()`。API 事实用 `javap -cp target/api-check io.papermc.paper.datacomponent.item.Consumable` 复核，别靠记忆 |
+| **`PotionEffectTypeWrapper.values0()` 不存在** | 枚举效果统一用 `PotionEffectType.getByName(String)` 拿 |
+| **免疫判定必须放在腐蚀步进之后** | 先累后打的口径不能松。免疫窗口内**不步进腐蚀**（既不涨也不靠它降），避免「喝药期间偷偷攒腐蚀」 |
+| **免疫是内存态，quit 要清** | `DustImmunity` 不落盘；`AntiDustListener#onQuit` 同时清免疫与冷却，否则「下线喝药、上线免伤」 |
+| **抗尘埃药的监听器只注册一次** | reload 路径复用实例（两个类都从 `plugin.config()` 动态取配置）。Bukkit `HandlerList` 不支持按实例注销，重复注册会让同一事件被处理多次 |
+| **`CommandOutput.percent` 收比例** | `/rad status` 里传 `0.72` 会印 `72%`；乘 100 会印 `7200%`。这个 bug 是被 `statusExplainsCoveredAndNoLongerImmune` 抓到的 |
+| **护甲「完全免疫」已删，`IMMUNE` 枚举保留** | `RoundResult.IMMUNE` 现在是抗尘埃药专用。`PluginConfig` 硬校验任何材质「权重和 × 系数 ≥ 1.0」直接拒载，旧 `NETHERITE: 1.00` 配置会报错 |
+| **HUD 段改名要同步弃用旧常量** | `◆免疫` → `◆抗尘`；旧 `IMMUNE_MARK` 与 `renderLevelBar(..., double)` 重载保留 `@Deprecated`，仅为不打断按字符串匹配的外部插件 |
+| **MockBukkit 的 `displayName()` 带方括号** | 断言物品名用 `contains`，别用 `isEqualTo` |
+| **RCON 单次只可靠执行一条命令** | 本仓库 `tools/rconlib.ps1` 因首行注释编码损坏而失效（`function` 关键字被吞），需要时临时写独立脚本；`setblock` 到未加载区块会报「That position is not loaded」，先 `forceload add` |
+
 ---
 
 ## 11. 后续方向（plan.md 文末候选）
@@ -403,8 +481,8 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 ## 12. 交接说明（给下一位维护者）
 
 **当前状态**：M1–M4 完成并实机验收；命令层与日志优化已完成并验证；构建混淆已评估并
-**明确放弃**；v1.1 判定链路加固已完成（188 条测试全绿）；CI/CD 自动发行已上线
-（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
+**明确放弃**；v1.1 判定链路加固已完成；**v1.2 护甲削弱 + 抗尘埃药已完成（265 条测试全绿）**；
+CI/CD 自动发行已上线（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
 **产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
 
@@ -416,7 +494,7 @@ GitHub Releases（唯一发布源）
 本地构建仍产出 `target/RadSurvival.jar`（版本号 `1.0.0-SNAPSHOT`），仅用于自测与实机冒烟。
 `test-server/` **不入库**（世界存档 + 明文凭据），验证脚本在 [tools/](tools/)。
 
-**接手后第一件事**：跑一次 `mvn -B clean package` 确认 188 条全绿。
+**接手后第一件事**：跑一次 `mvn -B clean package` 确认 265 条全绿。
 
 > 文档改动不涉及代码，产物无需重建。
 
@@ -466,6 +544,9 @@ GitHub Releases（唯一发布源）
 | 加表现层效果 | `FeedbackService` | 用完要能在 `shutdown()` 解绑 | `CorrosionStageFeedbackMockBukkitTest` |
 | 改露天判定 | `SunExposureChecker`（内核）+ 适配层 | 异步路径见 §8 | `SunExposureCheckerTest` |
 | 加对外事件 | `api/` 包 | 只加不改，保持二进制兼容 | `RadiationExposureEventChainTest` |
+| 改抗尘埃药档位/作物 | `config.yml` 的 `anti_dust.levels` | 档位顺序即优先级，重复作物会拒载 | `PluginConfigValidationTest` + `AntiDustChainMockBukkitTest` |
+| 加一个新的「自制物品」 | `item/` 包（照 `DustItemFactory`） | 基底材质 + PDC 标识 + 组件；**不能造新 ID** | 物品工厂测试（PDC 往返 / 组件存在） |
+| 加一个新的多方块结构 | `item/` 包（照 `DustCraftStructure`） | 纯 `Material` 判定与真实方块读取要分两层 | 必须放 `mockbukkit/`（Tag 需注册表） |
 
 ### 13.2 可直接注入的测试缝
 
@@ -475,6 +556,7 @@ GitHub Releases（唯一发布源）
 | `DamageApplier.DamageExecutor` | 真实掉血 | 绕开 MockBukkit 未实现的 `damage(double, DamageSource)` |
 | `SunExposureChecker.ScanDispatcher` | 异步补扫 | 单测注入直连/队列执行器，生产传 `runTaskAsynchronously` |
 | `SunRadiationListener` 的 `LongSupplier clock` | 时间窗判定 | 免 sleep 测窗口过期 |
+| `DustImmunity` 的 `LongSupplier clock`（v1.2） | 免疫窗口 | 免 sleep 精确测边界（`DustImmunityTest`） |
 | `CorrosionMeter` 阶段回调 | 阶段播报 | 记录/断言跨阈值 |
 
 > 除这些缝之外，**过滤链 / 腐蚀步进 / 免疫短路 / 事件链 / 伤害全部走生产代码**——
@@ -491,6 +573,8 @@ GitHub Releases（唯一发布源）
 | `DamageApplier.setDamageFeedbackHook(...)` | `setDamageFeedbackHook(null)` | 同上 |
 | `PlaceholderBridge.registerIfAvailable(...)` | `PlaceholderBridge.unregister()` | 同上（无 PAPI 时验证静默） |
 | HUD/BossBar 周期任务 | `cancel()` + 移除 BossBar | `CorrosionStageFeedbackMockBukkitTest` |
+| `DustCraftGui` / `AntiDustListener`（v1.2，**只注册一次**） | 不注销，改为清状态：`antiDustListener.clearCooldowns()` | `AntiDustChainMockBukkitTest` |
+| `DustImmunity`（v1.2） | `services.shutdown()` 调 `clearAll()` | `DustImmunityTest` |
 
 **写法约定**：构造函数里把回调存成字段（`hookRef` / `stageRef`），解绑时用**同一个字段**，
 不要现场写新的 lambda——新 lambda 的引用不同，`remove` 会静默失败。
@@ -534,6 +618,25 @@ GitHub Releases（唯一发布源）
 - **选择**：默认 fat jar，Caffeine/Configurate 等 relocate 到 `com.ft.radsurvival.lib.*`。
 - **代价**：产物 ~1.8 MB。
 - **推翻条件**：目标服务器环境能稳定访问该镜像，且希望减小下载体积 → 用 `-Plibraries-channel`。
+
+### ADR-6 抗尘埃药用「原版基底 + PDC」，不造新物品（v1.2）
+
+- **背景**：需求要一个全新物品。但 Bukkit 与数据包都**不允许**插件注册新物品 ID。
+- **选择**：`HONEY_BOTTLE` 基底 + `DataComponentTypes` 覆盖名称/Lore/堆叠/外观/饮用动作
+  + PDC `radsurvival:dust_level` 存档位语义。工具物品（木棍）只作触发钥匙，不消耗。
+- **代价**：物品在创造模式物品栏里不可搜索（需 `/rad dust give` 或实机合成）；
+  `HONEY_BOTTLE` 自带的原版饮用音效需要接受。
+- **推翻条件**：Paper 提供稳定的自定义物品注册 API（届时迁移，PDC 标识可保留作兼容）。
+
+### ADR-7 冷却靠取消 `PlayerItemConsumeEvent`（v1.2）
+
+- **背景**：冷却有两种写法——原版 `USE_COOLDOWN` 组件，或插件自管。
+- **选择**：插件自管，冷却中直接 `setCancelled(true)`。Bukkit 取消该事件时**物品不消耗**，
+  于是「不扣东西」不需要额外代码，也不会出现「先扣后判」的中间态。
+- **代价**：冷却状态是内存态，重启/重连清零（`onQuit` 显式清，避免下线喝药上线免伤）。
+- **不选 `USE_COOLDOWN` 的原因**：它的冷却分组是原版共享的，写进去会让本插件药水
+  与原版食物/药水互相卡冷却，玩家体验变怪且难以解释。
+- **推翻条件**：需要跨重启保持冷却时，改为 PDC + 时间戳落盘（注意与原版分组彻底隔离）。
 
 ---
 

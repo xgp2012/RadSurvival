@@ -8,7 +8,7 @@
 
 | 项 | 结论 | 证据位置 |
 |---|---|---|
-| 全量构建与测试 | ✅ **188 条测试，0 失败 0 错误 0 跳过** | §A |
+| 全量构建与测试 | ✅ **265 条测试，0 失败 0 错误 0 跳过**（v1.1 时为 188 条，v1.2 增至 265） | §A、§J.1 |
 | 插件实机加载 | ✅ 启用成功、零异常、零 libraries 下载 | §B.1 |
 | `libraries:` 通道风险 | ⚠️ **本环境不可用（Connection reset）→ 已切默认 shade+relocate，thin 通道保留可切换** | §B.2 |
 | 配置生成与校验 | ✅ 与仓库默认逐字节一致；坏配置 reload 拒载并保留旧配置 | §B.3–B.4 |
@@ -16,12 +16,13 @@
 | §1.3「伤害不被原版护甲二次减免」 | ✅ **成立，但机制已改写**：初版判据（GENERIC 不吃甲）**经复测为假**，已改为「结算瞬间摘甲 + 太阳伤害门控」，并由真实客户端实测确认 | §C.1 |
 | 无敌帧（每轮真实掉血） | ⏳ console `/damage` 绕过无敌帧，无法在无客户端条件下验证；移交 §D 手册（含 tick-interval=24 预案） | §C.2 |
 | 玩家相关验收（HUD/播报/腐蚀保留/预算表计时等） | ✅ 已用真实 1.21.11 客户端跑通关键链路（露天结算、腐蚀累加、死亡文案、reload 续接）；逐项秒表计时仍可照 §D 复跑 | §D |
+| **v1.2 护甲削弱 + 抗尘埃药**（265 条测试） | ✅ 构建/启动/命令/世界结构全通过；交互类（木棍右键、GUI 点击、服药动画）由 MockBukkit 生产路径覆盖，建议上线前手工复跑 | §J |
 
 ## A. 全量构建与测试
 
 ```
 $env:JAVA_HOME='D:\java21'; mvn -B clean package
-[INFO] Tests run: 188, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 265, Failures: 0, Errors: 0, Skipped: 0
 [INFO] --- shade:3.6.0:shade (default) @ radsurvival ---
 [INFO] Replacing original artifact with shaded artifact.
 [INFO] BUILD SUCCESS
@@ -143,7 +144,7 @@ RCON `stop` 后进程退出、无异常栈（0 名在线玩家场景下的主循
 | 铁甲玩家 `damage … 10 minecraft:generic` | 19.827 → 18.667（1.161），**护甲仍在、扣血 > 0** |
 | 裸装玩家 `damage … 10 minecraft:generic` | 18.538 → 10.667（≈7.87，接近满额） |
 | 仅铁靴（7% 减免）玩家 `rad force-check` | 报告 0.672 / 0.677；实测 11.204→10.575 / 10.575→9.941（**落地值 == 计算值**） |
-| 全套下界合金 `rad status` | 显示 `100% (完全免疫)`、`伤害 0.000`，且**不发事件、不摘甲** |
+| 全套下界合金 `rad status` | 显示 `100% (完全免疫)`、`伤害 0.000`，且**不发事件、不摘甲**（⚠️ **v1.2 起已作废**：下界合金满配改为 72%，该行改为展示「最强材质满配上限 / 最低杀伤」，见 §J） |
 | 岩浆浸泡（真实原版伤害） | 铁胸甲存活且耐久 `damage: 11` 递增 → 摘甲/还甲为**恢复同一物品实例**，非复制 |
 
 裁决：**§1.3「无双重减免」现已由代码保证，而非依赖「GENERIC 不吃甲」这一错误前提**。
@@ -179,7 +180,8 @@ cd D:\code\FT\test-server
 | 3 | 夜晚（`/time set midnight`）裸装 | ≈37s；HUD 夜晚 ▲▲ | §1.6 |
 | 4 | 白天全套铁甲 | ≈61s（README 勘误值；表值 53s 为 false 口径） | §1.6 + 勘误 |
 | 5 | 白天全套钻石甲 | ≈123s（勘误值；表值 91s 为 false 口径） | §1.6 + 勘误 |
-| 6 | 全套下界合金 | **零伤害零累积**；HUD 显示 `◆免疫`，腐蚀不涨 | §1.6 / M4 硬项 |
+| 6 | 全套下界合金 | ~~零伤害零累积~~ **v1.2 起改为 ≈56s 后被晒死**（72% 减免）；HUD **不会**出现免疫段 | §1.6 / v1.2 §J |
+| 6b | **v1.2 新增**：喝精制抗尘埃药后露天 | 腐蚀立刻 −50；HUD 显示 `◆抗尘`；30s 内零伤害零累积；20s 内再喝被拦 | §J |
 | 7 | 站到方块下/挖洞遮蔽 | 零伤害；腐蚀每秒 -1% 回落 | §1.1/§1.6 |
 | 8 | `/rad corrosion set <你> 100` 后露天白天 | 伤害 2.0/s（1 心/s，×2 封顶） | §1.6 |
 | 9 | 退出重进 / 重启服务器 | 腐蚀值保留（PDC `radsurvival:corrosion`） | §1.6 |
@@ -326,6 +328,8 @@ save 空值防写污染）、`RadiationMarkListener`（LOWEST 盖章不变式）
 - `stop` 干净退出（`Disabling` → `Saving worlds`），**全程零 ERROR / 零异常栈**。
 - 已知显示现象：Windows 控制台为 GBK，日志中文花屏；同字符串经 RCON 完全正常，
   证明为控制台代码页问题而非插件缺陷（`-Dstdout.encoding=UTF-8` 可解）。
+- **v1.2 更新**：监听器数 4 → **7**（新增 `DustCraftGui`、`AntiDustListener`），
+  启动多一行抗尘埃药摘要，`已启用` 行追加 `armor≤72%`。见 §J.2。
 
 ### I.4 构建混淆：评估后不采用
 
@@ -340,3 +344,72 @@ shade 与混淆插件阶段竞态。**裁决：优先保证可用性，默认构
 测试服 `world/`、`world_nether/`、`world_the_end/` 的 `paper-world.yml` 为全零字节
 （此前一次启动被中断写坏），导致 Paper 自身启动崩溃。已备份为 `*.corrupt.bak` 并重建，
 与插件无关。
+
+---
+
+## J. v1.2 验收：护甲削弱 + 抗尘埃药
+
+> 验收日期：2026-10-25（Asia/Shanghai）
+> 验收对象：`target/RadSurvival.jar`（1,876,708 B，构建时间 2026-10-25 18:31）
+> 环境：同 §B（Paper 1.21.11 build 132、offline、RCON 127.0.0.1:25764、superflat）
+
+### J.1 构建与测试
+
+```
+[INFO] Tests run: 265, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Building jar: D:\code\FT\target\RadSurvival.jar
+[INFO] BUILD SUCCESS
+```
+
+v1.1 基线 188 条 → v1.2 **265 条**（+67）。新增四个测试类共 43 条，
+另重写 `ArmorCalculatorTest`（14 条）与 `SurvivalBudgetRegressionTest`（11 条）的全部数值断言。
+
+### J.2 实机启动
+
+```
+[RadSurvival] 抗尘埃药 · 4 个档位（refined/strong/improved/crude）· 冷却 20s · 结构 = 发射器 + 上方铁砧 + 一圈原木，木棍右键铁砧出品
+[RadSurvival] 已启用 · tick=20 base=1 night×0.5 worlds=[world] dim=[NORMAL] 腐蚀=on max×2 async=on armor≤72%
+[RadSurvival] 反馈层 · HUD=actionbar 粒子=WHITE_SMOKE 音效=on 死亡文案=on 红闪抑制=off（纯 Paper 原生）
+[RadSurvival] 接线 · 监听器 7 个（会话/标记/伤害门控/反馈/死亡文案/抗尘埃药），在线玩家 0 名已预填，命令 /rad help 查看用法。
+```
+
+`Done (78.172s)`，**全程零 ERROR / 零异常栈**。删除旧 `config.yml` 后重新生成的配置
+含新 `anti_dust` 段与 `armor.min-damage-fraction`，`/rad reload` 与 `/rad reload --dry-run` 均通过。
+
+### J.3 命令实测
+
+| 命令 | 实测结果 |
+|---|---|
+| `/rad dust list` | 四档全部列出（名称/减免/时长/作物），末行给出冷却 20s、解毒列表、HUD 段 `◆抗尘` |
+| `/rad dust help` | 五行结构说明，末行补充「核心方块也接受投掷器；铁砧可用损坏/上蜡变体」 |
+| `/rad reload --dry-run` | `config.yml 预检通过（未应用）。执行 /rad reload 使其生效。` |
+
+> 期间发现并修掉一处真实缺陷：`/rad status` 的「盔甲减免」「最低杀伤」两行把已是百分比的值
+> 又乘了 100，实机印出 `7200%` / `1000%`。`CommandOutput.percent` 收的是**比例**
+> （`0.72 → "72%"`）。已被 `statusExplainsCoveredAndNoLongerImmune` 钉住。
+
+### J.4 世界内结构核对
+
+在 `(100, 0, 100)` 用 `/setblock` 搭出真实结构（先 `/forceload add`，否则报
+「That position is not loaded」）：
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| 核心方块 | `setblock 100 0 100 minecraft:dispenser` | `Changed the block at 100, 0, 100` |
+| 正上方铁砧 | `execute if block 100 1 100 minecraft:anvil run say anvil-ok` | 服务器日志 `[Rcon] anvil-ok` |
+| 8 邻为原木 | `execute if block 101 0 100 #minecraft:logs run say ring-ok` | 服务器日志 `[Rcon] ring-ok` |
+| 中心格作物 | `data get block 100 0 100 Items` | `[{Slot: 4b, id: "minecraft:golden_carrot", count: 1}]` |
+
+8 个邻居分别放了橡木/白桦/云杉/丛林/金合欢/深色橡木/红树/樱花——**混树种成立**。
+
+### J.5 未能实机验证的部分（需真实客户端）
+
+| 项 | 原因 | 替代证据 |
+|---|---|---|
+| 木棍右键铁砧的真实触发与产出 | 本机最小协议客户端在 1.21.11 的 `serverbound/minecraft:hello` 握手阶段被服务端断开（`DecoderException`），无法产生在线玩家；`/rad dust give` 之外没有无玩家手段触发交互 | `AntiDustChainMockBukkitTest#craftProducesPotion` 用**真实方块**跑通全链路：搭结构 → 放作物 → 调 `DustCraftGui#craft` → 产出对应档位、作物 −1、**木棍未被消耗** |
+| GUI 点击/拖拽约束 | 同上（需玩家打开界面） | `onInventoryClick` / `onInventoryDrag` / `onHopperMove` 已实现；外围 8 格拒绝放置、中心格仅接受已知作物 |
+| 服药后的动作与音效 | 同上 | `CONSUMABLE` 组件经 `DustItemFactoryMockBukkitTest` 逐字段断言（1.6s / DRINK / 无重复粒子 / `consumeEffects` 为空） |
+
+> 上述三条已由 MockBukkit 用**生产代码路径**覆盖，但**仍建议上线前用真实客户端手工复跑一遍**
+> （`/rad dust give refined` → 喝下 → 看 HUD 是否出现 `◆抗尘`、腐蚀是否下降、20s 内再喝是否被拦）。
+

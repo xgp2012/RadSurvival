@@ -83,7 +83,7 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 > `-Plibraries-channel` 产 thin jar（111 KB），两者 plugin.yml 由构建 profile 自动切换。
 
 > **构建环境提示**：远程仓库偶发 socket 挂起（与代码无关，与 ProtocolLib/PAPI 同源问题）。
-> 依赖已齐时用 `mvn -o -B clean package` 离线构建（188 条测试离线全绿）。
+> 依赖已齐时用 `mvn -o -B clean package` 离线构建（265 条测试离线全绿）。
 
 > **依赖仓库实况（2026-10-18 实测）**：extendedclip→PAPI 2.12.3 pom/jar 可拉（极慢，~5–13KB/s）；
 > dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉但 jar 通道挂死——本地 `.m2` 已用**官方 GitHub Release
@@ -92,9 +92,19 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 
 ### 2.3 测试
 
-当前测试规模：**188 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
-M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11；
+当前测试规模：**265 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
+M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11 +
+**v1.2 抗尘埃药与护甲削弱 43**；
 `com.ft.radsurvival.mockbukkit` 与 `com.ft.radsurvival.listener` 包），无跳过项。
+
+v1.2 新增的四个测试类：
+
+| 类 | 条数 | 钉住什么 |
+|---|---|---|
+| `core/DustImmunityTest` | 8 | 免疫窗口边界（左开右闭）、重复服用取较长、clear 语义、惰性清理 |
+| `mockbukkit/DustCraftStructureMockBukkitTest` | 11 | 结构判定、Tag（铁砧/原木）、槽位映射、诊断信息 |
+| `mockbukkit/DustItemFactoryMockBukkitTest` | 8 | PDC 往返、`CONSUMABLE` 存在且 `consumeEffects` 为空、堆叠 8、档位失效 |
+| `mockbukkit/AntiDustChainMockBukkitTest` | 16 | **端到端**：搭真方块结构 → 放作物 → 木棍敲铁砧 → 产出 → 服用 → 免疫生效 → 冷却拦截 |
 
 ```powershell
 mvn -B test -Dtest=RadCommandMockBukkitTest    # 单类
@@ -125,14 +135,33 @@ mvn -B test -Dtest=A,B                         # 多类用逗号（不能用 +�
 
 ### 3.2 `armor` — 盔甲减免
 
-减免率 = `Σ(部位权重 × 材质系数)`，空槽计 0。
+减免率 = `Σ(部位权重 × 材质系数)`，空槽计 0；随后叠加**最低杀伤保底**（见下）。
 
 | 键 | 默认 |
 |---|---|
-| `armor.slot-weights` | `{helmet: 0.20, chestplate: 0.40, leggings: 0.30, boots: 0.10}` |
-| `armor.material-factors` | `{LEATHER: 0.25, GOLD: 0.45, CHAINMAIL: 0.45, IRON: 0.70, DIAMOND: 0.85, NETHERITE: 1.00}` |
+| `armor.slot-weights` | `{helmet: 0.12, chestplate: 0.46, leggings: 0.30, boots: 0.12}` |
+| `armor.material-factors` | `{LEATHER: 0.15, GOLD: 0.30, CHAINMAIL: 0.30, IRON: 0.48, DIAMOND: 0.60, NETHERITE: 0.72}` |
+| `armor.min-damage-fraction` | `0.10` |
 
-各值校验 ∈ [0,1]；材质键必须在上述集合内。**全套下界合金 = 1.00 恰好 100% 免疫**。
+各值校验 ∈ [0,1]；材质键必须在上述集合内。
+
+**v1.2 硬约束：禁止任何材质达成完全免疫。** 启动校验会逐材质算出「部位权重和 × 材质系数」，
+任一 `≥ 1.0` 即**拒绝加载**并给出该材质的实际乘积。旧的 `NETHERITE: 1.00` 配置现在会直接报错。
+允许 `armor-affects-accum: true` 与新的系数共存——72% 减免仍留 28% 累积速率，不存在零累积角落。
+
+**最低杀伤保底** `min-damage-fraction` ∈ `(0,1]`：单轮伤害不得低于
+`base × timeFactor × 腐蚀倍率 × min-damage-fraction`。即使把系数配到接近 1.0，
+阳光也永远保有这一份杀伤力（默认 10%）。
+
+满配对照（权重和 = 1.00）：
+
+| 材质 | 满配减免 | 满配受击 |
+|---|---|---|
+| 皮革 | 15% | 85% |
+| 金 / 锁链 | 30% | 70% |
+| 铁 | 48% | 52% |
+| 钻石 | 60% | 40% |
+| 下界合金 | 72% | 28% |
 
 ### 3.3 `corrosion` — 腐蚀条
 
@@ -141,14 +170,52 @@ mvn -B test -Dtest=A,B                         # 多类用逗号（不能用 +�
 | `enabled` | `true` | 关闭则伤害不随暴露时长放大 |
 | `day-accum-per-sec` | `1.0` | 白天露天累积 %/s（夜晚自动 × `night-multiplier`） |
 | `regen-per-sec` | `1.0` | 遮蔽/豁免维度恢复 %/s（仅在线生效，离线冻结） |
-| `armor-affects-accum` | `true` | 盔甲减免是否同时作用于累积速率。`true` = 全套下界合金既不累积也不掉血 |
+| `armor-affects-accum` | `true` | 盔甲减免是否同时作用于累积速率。`true` = 减免越高累积越慢（v1.2 后最高 72%，仍会累积） |
 | `max-multiplier` | `2.0` | 腐蚀 100% 时倍率上限，校验 ≥ 1（0% ≈ ×1.0） |
 | `curve` | `linear` | 放大曲线：`linear` \| `sqrt` \| `exp` |
 | `reset-on-death` | `true` | 死亡清零；与 `decay-on-death` 互斥 |
 | `decay-on-death` | *(未设置)* | 死亡按比例保留（如 `0.5` = 减半），校验 ∈ (0,1)，**仅当 `reset-on-death: false`** 时可设 |
 | `stages` | `{warn: 50, danger: 75}` | 穿越阈值时 title+音效提示 |
 
-### 3.4 `feedback` — 表现层
+### 3.4 `anti_dust` — 抗尘埃药（v1.2 新增）
+
+制药台是**多方块结构**，不是合成表：发射器/投掷器为核心方块，正上方压铁砧，
+同层 8 邻放满原木；作物放进核心方块 UI 的**中心格（索引 4）**，
+手持木棍右键铁砧完成合成（木棍不消耗）。
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | `false` = 不注册任何监听器，发射器完全退回原版行为 |
+| `cooldown-seconds` | `20` | 同一玩家两次服药最小间隔，校验 ≥ 0（0 = 无冷却） |
+| `cures` | `[POISON, HUNGER, NAUSEA, WEAKNESS, SLOWNESS]` | 服药瞬间无条件解除的状态效果（`PotionEffectType` 名） |
+| `hud-immume-mark` | `"◆抗尘"` | 免疫期间 HUD 显示的抗性段，不能为空 |
+| `levels.<id>` | 四档 | 见下表 |
+
+档位字段：`display-name`（物品名）、`color`（`#RRGGBB`）、`reduction`（服药降低的腐蚀百分点，
+校验 `(0,100]`）、`immune-seconds`（免疫时长，校验 ≥ 0）、`items`（触发该档位的作物 `Material` 名）。
+
+**档位顺序即优先级，取首个匹配**；同一作物被两个档位重复认领会**拒绝加载**。
+配置里没有 `anti_dust` 段时走内置默认表，老配置文件升级不会炸。
+
+| 档位 id | 默认名 | reduction | immune-seconds | items |
+|---|---|---|---|---|
+| `refined` | 精制抗尘埃药 | 50.0 | 30 | GOLDEN_CARROT, CHORUS_FRUIT, GLOW_BERRIES, ENCHANTED_GOLDEN_APPLE |
+| `strong` | 强效抗尘埃药 | 35.0 | 20 | NETHER_WART, CRIMSON_FUNGUS, WARPED_FUNGUS, SWEET_BERRIES |
+| `improved` | 改良抗尘埃药 | 25.0 | 15 | PUMPKIN, MELON_SLICE, SUGAR_CANE, COCOA_BEANS, BROWN_MUSHROOM, RED_MUSHROOM |
+| `crude` | 粗制抗尘埃药 | 15.0 | 10 | WHEAT, CARROT, POTATO, BEETROOT, KELP, DRIED_KELP, BAMBOO, CACTUS |
+
+实现要点（改代码时必读）：
+
+- 药水是「原版基底 + PDC 标识」：基底 `HONEY_BOTTLE`，档位存 `radsurvival:dust_level`。
+  Minecraft 不允许插件注册新物品 ID，数据包同样做不到。
+- 写入 `DataComponentTypes.CONSUMABLE` 只为拿到原版的**饮用动作**（动画/音效/扣物品），
+  `consumeEffects` 故意留空——真正的效果由 `AntiDustListener` 在 `PlayerItemConsumeEvent` 结算。
+- **冷却靠取消该事件实现**：Bukkit 取消 `PlayerItemConsumeEvent` 不扣物品，
+  于是「冷却中喝不掉且不亏东西」自然成立，不需要手写「先判后扣」。
+- **不写 `USE_COOLDOWN` 组件**：它的冷却分组是原版共享的，写进去会让本插件药水与原版食物互相卡冷却。
+- 免疫窗口是内存态（`DustImmunity`），quit 时清除——防止「下线喝药、上线免伤」。
+
+### 3.5 `feedback` — 表现层
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -159,7 +226,7 @@ mvn -B test -Dtest=A,B                         # 多类用逗号（不能用 +�
 | `bossbar-corrosion` | `false` | `true` = 腐蚀条改用 BossBar 常驻，actionbar 仅显示辐射等级条 |
 | `protocol-lib` | `auto` | `auto` \| `true` \| `false`；仅做「抑制原版受伤红闪」，检测不到/异常时留桩降级 |
 
-### 3.5 `commands`
+### 3.6 `commands`
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -178,6 +245,7 @@ mvn -B test -Dtest=A,B                         # 多类用逗号（不能用 +�
 | `/rad status [player]` | `st` / `info` | 只读预览一轮：昼夜阶段与 timeFactor、露天判定、当前腐蚀与倍率、盔甲减免、预计本轮伤害/跳过或免疫原因。**控制台/RCON 无参**时输出配置摘要 + 各启用世界昼夜 | `radsurvival.use` |
 | `/rad force-check [player]` | `check` / `fc` | 立即对目标跑一轮**真实结算**（与主循环同一 `DamageApplier` 路径：事件广播→掉血）。免疫/过滤跳过时明确报告原因 | 无需管理权限（操作自身角色） |
 | `/rad corrosion <get\|set\|add> <player> [值]` | `cor` / `c` | `set` 钳 [0,100]、`add` 支持负数同样钳制；写后同步内存权威、状态镜像与 Player PDC（`radsurvival:corrosion`）；掉线玩家报错。`get` 同时显示内存权威与 PDC 落盘值 | `radsurvival.admin` |
+| `/rad dust <list\|give\|help>` | `d` / `anti-dust` | `list` 打印四档与作物归属；`give <档位> [player]` 直接发药（档位 id 或作物名均可）；`help` 打印制药台结构 | `radsurvival.admin` |
 | `/rad help [子命令]` | `?` / `h` | 子命令按发送者权限裁剪，附当前生效配置一行 | — |
 
 - 无参 `/rad` 直接出帮助；打错子命令给**最近似建议**（`/rad stats` → 「你是不是想用 status？」）。
@@ -195,10 +263,14 @@ tick-interval（≥20 全局任务）
             → radsurvival.exempt 豁免 → require-on-ground
      └─ 露天判定（60s chunk 段缓存；豁免维度在扫描前短路 = 非露天）
          └─ ★ 先腐蚀步进、后伤害结算
-             └─ 减免 ≥100% 完全免疫短路（不掉血、不发事件、不播反馈）
-                 └─ RadiationExposureEvent（可取消、可 setFinalDamage 改伤）
-                     └─ 稳定 API 掉血
+             └─ 抗尘埃药免疫窗口短路（不掉血、不发事件、不播反馈；v1.2 唯一免疫来源）
+                 └─ 公式伤害 → 最低杀伤保底 max(公式, 基线 × min-damage-fraction)
+                     └─ RadiationExposureEvent（可取消、可 setFinalDamage 改伤）
+                         └─ 稳定 API 掉血
 ```
+
+> v1.2 之前这里还有一级「盔甲减免 ≥100% 完全免疫短路」，已随护甲削弱删除——
+> 护甲现在只能减伤，`IMMUNE` 结果只由抗尘埃药窗口产生。
 
 **伤害来源标记**：`radsurvival:source=radiation` 由 LOWEST 优先级的自有监听写在**事件瞬态 PDC** 上，
 其他插件在 NORMAL 及以后优先级即可读到。
@@ -216,34 +288,65 @@ tick-interval（≥20 全局任务）
 | `▲▲▲▲▲` | 露天白天满强度（5 格 = 基准伤害） |
 | `▲▲△△△` | 夜晚 timeFactor 0.5 → 2 格 |
 | `●安全` | 有遮蔽 / 被过滤链跳过 |
-| `◆免疫` | 盔甲减免 ≥ 100% 且露天 |
+| `◆抗尘` | 抗尘埃药免疫窗口内且露天（v1.2；旧的 `◆免疫` 已废弃） |
 | `腐蚀 67% ▓▓▓▓▓▓▓░░` | 腐蚀条 10 格，颜色按阶段（normal 白 / warn 黄 / danger 红） |
+
+`HudRenderer.IMMUNE_MARK`（`◆免疫`）保留为 `@Deprecated` 常量仅为兼容外部按字符串匹配的插件，
+正常情况下不会再出现在 HUD 上；`renderLevelBar` / `renderActionBar` 的旧 `double armorReduction`
+重载同样标 `@Deprecated`，第三个参数已改为 `boolean dustImmune`。
 
 ---
 
 ## 6. 数值口径与勘误
 
-**`corrosion.armor-affects-accum` 保持默认 `true`**（plan.md §1.6「盔甲同样作用于累积速率……
-全套下界合金既不累积也不掉血」）。由此产生一处与 §1.6 生存预算表的系统性偏差，现予勘误：
+**v1.2 护甲全面削弱**是本期最大的数值变更，原 §1.6 预算表与旧断言全部随之重算。
 
-- 预算表表头按「累积 1%/s」推导各行死亡时间，隐含**盔甲不减免累积**（= `false` 口径）
-  —— 表中「死亡时腐蚀 ≈ 暴露秒数」（铁全 ~53s/53% 等）即为证据；
-- 默认 `true` 下重甲长曝场景累积更慢、死亡更晚：**白天·铁全 ≈61s（+15%，仍在 ±20% 容差边缘）、
-  白天·钻石全 ≈123s（+35%，超容差）**；裸装两口径完全等价（无甲 → ×(1−0)=1）；
-- 该偏差方向与量级已被 `SurvivalBudgetRegressionTest#armorAffectsAccumDefaultDeviatesFromTable`
-  钉死为回归断言；**对照预算表时，受甲行应预期偏慢**。若要求表实相符可改
-  `armor-affects-accum: false` 或重排表值——本期不改默认，因为「全下界合金零伤害零累积」
-  是硬性验收项，只有 `true` 能同时成立；
-- plan.md 本体按约定不作修改。
+### 6.1 v1.2 护甲削弱对照
+
+| 材质 | 旧系数 | 新系数 | 旧满配 | 新满配 | 白天死亡（旧→新） |
+|---|---|---|---|---|---|
+| 皮革 | 0.25 | 0.15 | 25% | 15% | ≈22s → ≈22s |
+| 金 / 锁链 | 0.45 | 0.30 | 45% | 30% | — |
+| 铁 | 0.70 | 0.48 | 70% | 48% | ≈70s → ≈33s |
+| 钻石 | 0.85 | 0.60 | 85% | 60% | ≈91s → ≈42s |
+| 下界合金 | 1.00 | 0.72 | **100%（免疫）** | 72% | **∞（免疫）→ ≈56s** |
+
+部位权重同时调整：头盔 0.20→0.12、胸甲 0.40→0.46、护腿 0.30 不变、靴子 0.10→0.12
+（权重和仍为 1.00，胸甲更贵、四肢更便宜，符合「护住要害」的直觉）。
+
+**两处语义删除**：
+
+1. `RadiationTask` 里 `armorReduction >= 1.0 → IMMUNE` 的短路分支已移除。
+   `RoundResult.IMMUNE` 这个枚举值**保留**，但现在唯一来源是抗尘埃药免疫窗口。
+2. `PluginConfig` 新增硬校验：任何材质「权重和 × 系数 ≥ 1.0」直接拒绝加载。
+   旧配置里的 `NETHERITE: 1.00` 会在启动时报错并指出实际乘积。
+
+### 6.2 最低杀伤保底
+
+`finalDamage = max(公式伤害, base × timeFactor × 腐蚀倍率 × min-damage-fraction)`。
+纯函数实现为 `ArmorCalculator.applyFloor(damage, baseline, minDamageFraction)`；
+`baseline ≤ 0`（如夜晚因子 0）时原样返回，不会凭空造伤害。
+
+### 6.3 `corrosion.armor-affects-accum` 偏差（仍然存在，量级已变）
+
+默认 `true` 下盔甲同时减伤与减累积，与「累积 1%/s」的预算表口径存在系统性偏差
+（方向：穿得越厚死得越晚）。v1.2 下调系数后偏差仍成立但绝对值变了：
+
+- 白天·铁全：不参与累积 ≈33s，参与累积 ≈36s
+- 白天·钻石全：不参与累积 ≈42s，参与累积 ≈42s
+- 裸装两口径完全等价（无甲 → ×(1−0)=1）
+
+方向与量级被 `SurvivalBudgetRegressionTest#armorAffectsAccumDefaultDeviatesFromTable` 钉死为回归断言。
+**对照预算表时，受甲行应预期偏慢。**
 
 伤害基准不变：`base-damage: 1.0`（半心/s）、`max-multiplier: 2.0`（×2 封顶）、
 夜晚 `night-multiplier: 0.5`（累积同倍率减半，timeFactor 统一口径）。
 
-### 6.1 取整与浮点
+### 6.4 取整与浮点
 
 公式浮点原值直传 `damage()`，**不取整**（默认参数下半心 = 1.0 点）。
 
-### 6.2 CustomDamageMeta 延后（伤害主线 API 事实记录）
+### 6.5 CustomDamageMeta 延后（伤害主线 API 事实记录）
 
 - Paper `CustomDamageMeta`（`@UnstableApi`）配置开关**本期不做**；伤害主线只用稳定 API 即成立：
   自有 `RadiationExposureEvent` 广播 + 事件 PDC 标记 `radsurvival:source=radiation`（LOWEST 盖章）。
@@ -284,11 +387,21 @@ tick-interval（≥20 全局任务）
 | 占位符 | 含义 |
 |---|---|
 | `%radsurvival_exposure%` | 当前是否露天 |
-| `%radsurvival_reduction%` | 盔甲减免率 |
+| `%radsurvival_reduction%` | 盔甲减免率（v1.2 上限 0.72） |
 | `%radsurvival_timemul%` | 当前 timeFactor |
 | `%radsurvival_corrosion%` | 腐蚀值 |
+| `%radsurvival_dust%` | 抗尘埃药免疫剩余秒数（v1.2；未免疫为 `0`） |
 
 未安装 PAPI 时 `PlaceholderBridge` 完全不加载扩展类（零报错）。reload 会先卸旧再注册。
+
+`RadSurvivalApi` 在 v1.2 新增两个方法（只加不改，二进制兼容）：
+
+| 方法 | 语义 |
+|---|---|
+| `isImmune(Player)` | **语义变更**：现在只回答「抗尘埃药窗口是否生效」，不再看盔甲（护甲已无法免疫） |
+| `getImmunityRemainingSeconds(Player)` | 新增：免疫剩余秒数（0 = 未免疫） |
+
+第三方插件若用 `getArmorReduction(p) >= 1.0` 判断免疫，v1.2 后恒为 `false`——请改用 `isImmune`。
 
 ---
 
@@ -407,6 +520,10 @@ tick-interval（≥20 全局任务）
 | 配置改了没生效 | 先 `/rad reload --dry-run` 只校验不应用，确认合法后再 `/rad reload` |
 | 玩家想免除辐射 | 给 `radsurvival.exempt` 权限节点 |
 | 想看装配细节 | `/rad status`（控制台无参出配置摘要）；启动日志 3 行摘要与之同源 |
+| 制药台敲铁砧没反应 | `/rad dust help` 对照三条：铁砧在**正上方一格**、8 邻全是**原木**（木板不算）、中心格有**农作物**。缺任一条都不产出，但不会扣物品 |
+| 抗尘埃药喝了没反应 | 提示「冷却中」→ 等 `anti_dust.cooldown-seconds`；提示「配方已失效」→ 该档位已被配置删除，`/rad dust list` 看现存档位 |
+| 旧配置启动报「完全免疫」错误 | v1.2 禁止任何材质满配 ≥ 1.0。把该材质系数调低（默认下界合金 0.72） |
+| 玩家反映穿下界合金也被晒死 | **v1.2 有意如此**（72% 减免、仍吃 28%）。想免疫请用抗尘埃药 |
 
 **实机验收环境**：`test-server/`（Paper 1.21.11-132、离线模式、RCON 25764、superflat）**不入库**
 （含世界存档与明文凭据）。验证脚本见 [tools/](tools/)（RCON 客户端、日志读取、最小协议客户端），
@@ -421,7 +538,21 @@ tick-interval（≥20 全局任务）
 - **M3 ✅**：反馈层与对外 API——`CorrosionStageChangeEvent` + `HudRenderer`（纯函数双条）+ `FeedbackService`（actionbar 独立 1s 任务、阶段跳变 title+音效、受击粒子+音效、BossBar、reload 重建无泄漏、onDisable 全清）+ `DamageFeedbackHook` 受击挂点 + `DamageTagListener` 死亡文案 + `PlaceholderBridge` / PAPI + ProtocolLib 可选红闪抑制。新配置键 `bossbar-corrosion`(false)、`death-message`(true)、`protocol-lib`(auto) 全部带校验。
 - **M4 ✅**：实机验收（`test-server/` + Paper 1.21.11-132 + RCON）：插件实机启用/生成配置/坏配置 reload 拒载/控制台 status/onDisable 全部通过；**`libraries:` 通道实测失败 → 默认改 shade+relocate**；玩家侧项目转 17 项人工手册（§D）。
 - **命令层与日志优化 ✅（2026-10-25）**：`/rad` 子命令/别名/权限收敛到 `SubCommand` 枚举，输出按显示宽度对齐；启动日志改为 3 行紧凑摘要，与 `/rad status` 同源（`RadiationServices#describeFlags`）；粒子降级细节需 `-Dradsurvival.verbose=true` 才输出。
-- **v1.1 ✅**：判定链路加固 + 真实客户端复验（188 条测试全绿）——M4 的 §C.1 裁决被**推翻**，
+- **v1.1 ✅**：判定链路加固 + 真实客户端复验（265 条测试全绿）——M4 的 §C.1 裁决被**推翻**，
   修掉四处真实缺陷（[§9.1](#91-v11-判定链路加固四处真实缺陷)），移除会禁用服务端
   re-configuration API 的 `PlayerLoginEvent` 监听。已用真实 1.21.11 客户端跑通：露天结算、
   腐蚀累加、夜晚 ×0.5、死亡文案、`/rad reload` 续接、铁甲玩家外部伤害按原版减免且护甲完好。
+- **v1.2 ✅（本期）**：护甲全面削弱 + 移除下界合金免疫 + 抗尘埃药（265 条测试全绿）。
+  - **护甲**：六材质系数 0.15/0.30/0.30/0.48/0.60/0.72，部位权重 0.12/0.46/0.30/0.12；
+    新增硬校验禁止任何材质满配 ≥ 1.0；新增 `armor.min-damage-fraction`（默认 0.10）最低杀伤保底。
+  - **免疫重构**：删除 `RadiationTask` 的 `armorReduction >= 1.0` 短路；`RoundResult.IMMUNE`
+    改由抗尘埃药窗口产生；HUD 段从 `◆免疫` 换成 `◆抗尘`。
+  - **抗尘埃药**：多方块结构（发射器 + 正上方铁砧 + 同层 8 邻原木）+ 发射器 UI 中心格放作物 +
+    木棍右键铁砧合成（木棍不消耗）；四档作物表、降腐蚀、限时免疫、解毒、20s 冷却全部配置驱动；
+    `/rad dust list|give|help` 管理命令；`RadSurvivalApi#getImmunityRemainingSeconds`。
+  - **测试**：188 → 265 条（新增 `DustImmunityTest`、`DustCraftStructureMockBukkitTest`、
+    `DustItemFactoryMockBukkitTest`、`AntiDustChainMockBukkitTest` 共 43 条），
+    重写 `ArmorCalculatorTest` / `SurvivalBudgetRegressionTest` 全套数值断言。
+  - **实机复验**（Paper 1.21.11-132 + RCON）：插件启用无异常、启动日志含抗尘埃药装配行、
+    `rad dust list/help`、`rad reload` / `--dry-run`、世界内结构（铁砧就位 + 8 邻为
+    `#minecraft:logs`）与中心格作物全部核对通过。

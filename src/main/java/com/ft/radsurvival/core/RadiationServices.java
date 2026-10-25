@@ -22,6 +22,7 @@ public final class RadiationServices {
     private final SunExposureChecker sunExposureChecker;
     private final CorrosionMeter corrosionMeter;
     private final DamageApplier damageApplier;
+    private final DustImmunity dustImmunity;
     private final RadiationTask radiationTask;
 
     public RadiationServices(RadSurvivalPlugin plugin, PluginConfig config) {
@@ -52,11 +53,19 @@ public final class RadiationServices {
         this.damageApplier = damageExecutorOverride == null
                 ? new DamageApplier(plugin)
                 : new DamageApplier(plugin.getServer().getPluginManager(), damageExecutorOverride);
+        // v1.2：抗尘埃药免疫窗口随服务容器同生命周期（reload 重建 = 窗口清零，
+        // 避免旧配置下的长时长泄漏到新配置；玩家重新服药即可）
+        this.dustImmunity = new DustImmunity();
         this.radiationTask = exposureResolverOverride == null
-                ? new RadiationTask(plugin, config, sunExposureChecker,
-                        dayNightProvider, armorCalculator, corrosionMeter, damageApplier)
+                ? new RadiationTask(plugin, config, sunExposureChecker, defaultResolverEnabled(sunExposureChecker),
+                        dayNightProvider, armorCalculator, corrosionMeter, damageApplier, dustImmunity)
                 : new RadiationTask(plugin, config, sunExposureChecker, exposureResolverOverride,
-                        dayNightProvider, armorCalculator, corrosionMeter, damageApplier);
+                        dayNightProvider, armorCalculator, corrosionMeter, damageApplier, dustImmunity);
+    }
+
+    /** 生产默认露天解析器（与 {@link RadiationTask#defaultResolver} 同口径，抽成方法便于两个构造共用）。 */
+    private static RadiationTask.ExposureResolver defaultResolverEnabled(SunExposureChecker checker) {
+        return RadiationTask.defaultResolver(checker);
     }
 
     /** 启动主循环任务（监听器注册、状态表预填完成后调用）。 */
@@ -75,6 +84,7 @@ public final class RadiationServices {
         }
         radiationTask.clearStates();
         sunExposureChecker.invalidateAll();
+        dustImmunity.clearAll(); // v1.2：免疫窗口不跨容器保留
     }
 
     /** 冲刷在线玩家腐蚀到 PDC（不清状态，供 onDisable 分段调用/测试）。 */
@@ -102,7 +112,9 @@ public final class RadiationServices {
                 + " worlds=" + config.enabledWorlds()
                 + " dim=" + config.dimensions()
                 + " 腐蚀=" + (cor.enabled() ? "on" : "off") + " max×" + trim(cor.maxMultiplier())
-                + " async=" + (config.asyncExposureScan() ? "on" : "off");
+                + " async=" + (config.asyncExposureScan() ? "on" : "off")
+                // v1.2：护甲最强满配减免（永远 < 100%，100% 免疫已移除）
+                + " armor≤" + trim(config.armor().maxFullSetReduction() * 100) + "%";
     }
 
     private static String trim(double value) {
@@ -131,5 +143,10 @@ public final class RadiationServices {
 
     public RadiationTask radiationTask() {
         return radiationTask;
+    }
+
+    /** v1.2：抗尘埃药免疫窗口（结算链 + 命令/API 读口）。 */
+    public DustImmunity dustImmunity() {
+        return dustImmunity;
     }
 }

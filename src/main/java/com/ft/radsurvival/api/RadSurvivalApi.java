@@ -146,9 +146,19 @@ public final class RadSurvivalApi {
         return state == null ? 0.0 : state.getArmorReduction();
     }
 
-    /** 是否处于完全免疫（减免 ≥ 1.0，§1.3 口径；未登记 = 不免疫）。 */
+    /** 是否处于完全免疫（v1.2 起仅指抗尘埃药免疫窗口；护甲已无法达成免疫）。 */
     public boolean isImmune(Player player) {
-        return getArmorReduction(player) >= 1.0;
+        RadiationServices services = plugin.services();
+        return services != null && services.dustImmunity().isImmune(player);
+    }
+
+    /**
+     * 抗尘埃药免疫剩余秒数（v1.2；0 = 未免疫）。
+     * 外部插件做「限时免伤」类联动时用它，不要自己去读药水效果。
+     */
+    public int getImmunityRemainingSeconds(Player player) {
+        RadiationServices services = plugin.services();
+        return services == null ? 0 : services.dustImmunity().remainingSeconds(player.getUniqueId());
     }
 
     private com.ft.radsurvival.core.PlayerRadState stateOf(Player player) {

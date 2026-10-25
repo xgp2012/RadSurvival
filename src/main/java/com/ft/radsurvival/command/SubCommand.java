@@ -28,6 +28,10 @@ enum SubCommand {
             "腐蚀条查询/设定/增减（值域钳 [0,100]）",
             "/rad corrosion <get|set|add> <player> [值]", RadCommand.PERMISSION_ADMIN),
 
+    DUST("dust", List.of("d", "anti-dust"),
+            "抗尘埃药：列出档位 / 发放药水 / 查看制作结构",
+            "/rad dust <list|give|help>", RadCommand.PERMISSION_ADMIN),
+
     HELP("help", List.of("?", "h"),
             "显示本帮助", "/rad help [子命令]", null);
 

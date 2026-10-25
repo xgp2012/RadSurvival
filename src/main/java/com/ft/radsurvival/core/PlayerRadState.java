@@ -18,7 +18,7 @@ public final class PlayerRadState {
     private double corrosion;
     /** §1.4 当前盔甲减免 [0,1]。 */
     private double armorReduction;
-    /** §1.3 最近一轮实际结算的伤害（0 = 被免疫/跳过；M4 无敌帧断言可用）。 */
+    /** §1.3 最近一轮实际结算的伤害（0 = 被跳过/抗尘埃药免疫；M4 无敌帧断言可用）。 */
     private double lastDamage;
     /** §2 上次结算时间戳（毫秒，System.currentTimeMillis 口径；离线期间不推进 → 冻结）。 */
     private long lastSettleStamp;

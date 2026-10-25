@@ -1,3 +1,5 @@
+# 注意: 本文件是 UTF-8。用 -Encoding Default 读会解码成乱码并把 function 关键字吞掉，
+#       必须指定 UTF-8:  Invoke-Expression (Get-Content tools\rconlib.ps1 -Raw -Encoding utf8)
 # RadSurvival - 内联 RCON 客户端（用 Invoke-Expression 加载，避开 .ps1 执行策略限制）
 # 用法: Invoke-Expression (Get-Content tools\rconlib.ps1 -Raw)
 #       Send-Rcon -Commands 'plugins','rad status'

@@ -54,11 +54,12 @@ public final class PluginConfig {
             "helmet", "chestplate", "leggings", "boots");
 
     private static final Map<String, Double> DEFAULT_SLOT_WEIGHTS = Map.of(
-            "helmet", 0.20, "chestplate", 0.40, "leggings", 0.30, "boots", 0.10);
+            "helmet", 0.12, "chestplate", 0.46, "leggings", 0.30, "boots", 0.12);
 
+    /** 材质系数默认值（v1.2 全面削弱：下界合金 1.00 → 0.72，取消完全免疫）。 */
     private static final Map<String, Double> DEFAULT_MATERIAL_FACTORS = Map.of(
-            "LEATHER", 0.25, "GOLD", 0.45, "CHAINMAIL", 0.45,
-            "IRON", 0.70, "DIAMOND", 0.85, "NETHERITE", 1.00);
+            "LEATHER", 0.15, "GOLD", 0.30, "CHAINMAIL", 0.30,
+            "IRON", 0.48, "DIAMOND", 0.60, "NETHERITE", 0.72);
 
     /**
      * ProtocolLib 增强开关（M3，§1.5/§5.2：feedback.protocol-lib = auto | true | false）。
@@ -106,7 +107,108 @@ public final class PluginConfig {
 
     // ---------------------------------------------------------------- sections
 
-    public record ArmorConfig(Map<String, Double> slotWeights, Map<String, Double> materialFactors) {
+    /**
+     * 盔甲减免模型（§1.4；v1.2 起扩展）。
+     *
+     * <p><b>v1.2 语义变更</b>：旧口径允许「材质系数 1.00 → 全套减免恰 1.0 → 完全免疫」，
+     * 下界合金因此可以彻底无视阳光。现改为<b>禁止任何材质通向免疫</b>：校验会逐材质算出
+     * 满配减免，任一 ≥ 1.0 即报错；同时 {@link #minDamageFraction} 提供最低杀伤保底，
+     * 即使将来放宽系数，单轮伤害也不会被压到 0。</p>
+     *
+     * @param slotWeights       部位权重（helmet/chestplate/leggings/boots → [0,1]）
+     * @param materialFactors   材质系数（LEATHER/GOLD/CHAINMAIL/IRON/DIAMOND/NETHERITE → [0,1]）
+     * @param minDamageFraction 最低杀伤比例 ∈ (0,1]：finalDamage 不得低于
+     *                          {@code base × timeFactor × corrosionMult × minDamageFraction}
+     */
+    public record ArmorConfig(Map<String, Double> slotWeights,
+                              Map<String, Double> materialFactors,
+                              double minDamageFraction) {
+
+        /** 某材质的「全套满配」减免（权重和 × 该材质系数，钳 [0,1]）。 */
+        public double fullSetReduction(String materialKey) {
+            Double factor = materialFactors.get(materialKey.toUpperCase(Locale.ROOT));
+            if (factor == null) {
+                return 0.0;
+            }
+            double weightSum = slotWeights.values().stream().mapToDouble(Double::doubleValue).sum();
+            return Math.min(1.0, Math.max(0.0, weightSum * factor));
+        }
+
+        /** 全部材质里最高的「全套满配」减免（用于日志与 /rad status 摘要）。 */
+        public double maxFullSetReduction() {
+            return materialFactors.keySet().stream()
+                    .mapToDouble(this::fullSetReduction).max().orElse(0.0);
+        }
+    }
+
+    /**
+     * 抗尘埃药档位（v1.2新增，anti_dust.levels 的一项）。
+     *
+     * @param id             档位键名（refined/strong/improved/crude，配置文件里的键）
+     * @param displayName    物品显示名（不含颜色码，颜色由 {@link #color} 决定）
+     * @param color          物品名颜色（#RRGGBB）
+     * @param corrosionReduction 服药瞬间降低的腐蚀值（百分点 ∈ (0,100]）
+     * @param immuneSeconds  辐射免疫时长（秒，≥ 0；0 = 只降腐蚀不免伤）
+     * @param items          触发本档位的农作物物品枚举名（大写，按配置文件顺序）
+     */
+    public record DustLevel(String id,
+                            String displayName,
+                            String color,
+                            double corrosionReduction,
+                            int immuneSeconds,
+                            List<String> items) {
+    }
+
+    /**
+     * 抗尘埃药配置（v1.2 新增）。
+     *
+     * @param enabled         总开关（false = 不注册任何监听器，发射器保持原版行为）
+     * @param cooldownSeconds 同一玩家两次服药的最小间隔（秒，≥ 0）
+     * @param cures           服药瞬间无条件解除的状态效果名（大写，如 POISON）
+     * @param hudImmuneMark   免疫期间 HUD 显示的抗性段文本
+     * @param levels          档位表（顺序 = 配置文件顺序 = 由强到弱，取首个匹配）
+     */
+    public record AntiDustConfig(boolean enabled,
+                                 int cooldownSeconds,
+                                 List<String> cures,
+                                 String hudImmuneMark,
+                                 List<DustLevel> levels) {
+
+        /** 某物品命中的档位（无匹配返回 null）。 */
+        public DustLevel levelFor(String materialName) {
+            if (materialName == null) {
+                return null;
+            }
+            String upper = materialName.toUpperCase(Locale.ROOT);
+            for (DustLevel level : levels) {
+                if (level.items().contains(upper)) {
+                    return level;
+                }
+            }
+            return null;
+        }
+
+        /** 按档位 id 找档位（物品 PDC 里存的就是这个 id，未知返回 null）。 */
+        public DustLevel levelById(String id) {
+            if (id == null) {
+                return null;
+            }
+            for (DustLevel level : levels) {
+                if (level.id().equalsIgnoreCase(id)) {
+                    return level;
+                }
+            }
+            return null;
+        }
+
+        /** 全部被任何一个档位认领的物品名（GUI 校验「这个物品能不能放中心格」）。 */
+        public Set<String> acceptedItems() {
+            Set<String> out = new TreeSet<>();
+            for (DustLevel level : levels) {
+                out.addAll(level.items());
+            }
+            return Collections.unmodifiableSet(out);
+        }
     }
 
     public record CorrosionConfig(
@@ -176,13 +278,14 @@ public final class PluginConfig {
     private final CorrosionConfig corrosion;
     private final FeedbackConfig feedback;
     private final CommandsConfig commands;
+    private final AntiDustConfig antiDust;
 
     private PluginConfig(Set<String> enabledWorlds, Set<World.Environment> dimensions, int tickInterval,
                          double baseDamage, Set<GameMode> damageGameModes, boolean requireOnGround,
                          double nightMultiplier, boolean smoothTransition, boolean transparentCover,
                          boolean asyncExposureScan,
                          ArmorConfig armor, CorrosionConfig corrosion, FeedbackConfig feedback,
-                         CommandsConfig commands) {
+                         CommandsConfig commands, AntiDustConfig antiDust) {
         this.enabledWorlds = enabledWorlds;
         this.dimensions = dimensions;
         this.tickInterval = tickInterval;
@@ -197,6 +300,7 @@ public final class PluginConfig {
         this.corrosion = corrosion;
         this.feedback = feedback;
         this.commands = commands;
+        this.antiDust = antiDust;
     }
 
     // ----------------------------------------------------------------- loaders
@@ -294,6 +398,11 @@ public final class PluginConfig {
         return commands;
     }
 
+    /** 抗尘埃药配置（v1.2 新增）。 */
+    public AntiDustConfig antiDust() {
+        return antiDust;
+    }
+
     // -------------------------------------------------------- parse & validate
 
     private static LoadResult parse(ConfigurationNode root) {
@@ -327,14 +436,43 @@ public final class PluginConfig {
         boolean asyncExposureScan = requireBool(root.node("async-exposure-scan"), true,
                 "async-exposure-scan", errors);
 
-        // armor（§1.4）
+        // armor（§1.4；v1.2 全面削弱 + 禁止免疫）
         Map<String, Double> slotWeights = readFactorMap(
                 root.node("armor", "slot-weights"), DEFAULT_SLOT_WEIGHTS, ALLOWED_SLOTS,
                 "armor.slot-weights", errors, false);
         Map<String, Double> materialFactors = readFactorMap(
                 root.node("armor", "material-factors"), DEFAULT_MATERIAL_FACTORS, ALLOWED_MATERIALS,
                 "armor.material-factors", errors, true);
-        ArmorConfig armor = new ArmorConfig(slotWeights, materialFactors);
+        double minDamageFraction = requireDouble(root.node("armor", "min-damage-fraction"), 0.10,
+                "armor.min-damage-fraction", errors);
+        if (minDamageFraction <= 0.0 || minDamageFraction > 1.0) {
+            errors.add("armor.min-damage-fraction=" + fmt(minDamageFraction)
+                    + " 非法：最低杀伤保底必须位于开区间 (0,1]（0.10 = 最强防护下仍承受 10% 阳光伤害）");
+        }
+        ArmorConfig armor = new ArmorConfig(slotWeights, materialFactors, minDamageFraction);
+        // v1.2 硬约束：任何材质都不得通过「系数 1.0」达成完全免疫（下界合金免疫已移除）
+        double weightSum = slotWeights.values().stream().mapToDouble(Double::doubleValue).sum();
+        // 先校验权重和本身，再校验逐材质乘积——否则权重表写错时会先冒出
+        // 「该系数 × 部位权重和(0) = 0」这种指错方向的报错。
+        if (weightSum <= 0.0) {
+            errors.add("armor.slot-weights 全为 0：至少保留一个部位权重 > 0，否则盔甲完全不起作用");
+        }
+        // 权重和不得 > 1.0：满配减免被定义为「权重和 × 系数」，权重和 > 1 会让
+        // 「按系数判断是否免疫」失去意义（乘出来的乘积可以轻易 ≥ 1），
+        // 也会让 /rad status 展示的百分比超过 100%。
+        if (weightSum > 1.0 + 1e-9) {
+            errors.add("armor.slot-weights 权重和 = " + fmt(weightSum)
+                    + " 非法：必须 ≤ 1.0（满配减免 = 权重和 × 材质系数，权重和 >1 会让百分比超过 100%）");
+        }
+        for (Map.Entry<String, Double> entry : new TreeMap<>(materialFactors).entrySet()) {
+            double fullSet = weightSum * entry.getValue();
+            if (fullSet >= 1.0 - 1e-9) {
+                errors.add("armor.material-factors." + entry.getKey() + "=" + fmt(entry.getValue())
+                        + " 非法：该系数 × 部位权重和(" + fmt(weightSum) + ") = " + fmt(fullSet)
+                        + " ≥ 1.0 —— v1.2 起禁止任何盔甲材质达成完全免疫（下界合金免疫已移除），"
+                        + "请调低该系数（参考默认：皮革 .15 / 金·锁链 .30 / 铁 .48 / 钻石 .60 / 下界合金 .72）");
+            }
+        }
 
         // corrosion（§1.6）
         ConfigurationNode c = root.node("corrosion");
@@ -392,12 +530,15 @@ public final class PluginConfig {
             errors.add("commands.reload-permission 不能为空：需要权限节点名（如 radsurvival.reload）");
         }
 
+        // anti_dust（v1.2）
+        AntiDustConfig antiDust = readAntiDust(root.node("anti_dust"), errors);
+
         if (!errors.isEmpty()) {
             return new LoadResult(null, List.copyOf(errors));
         }
         PluginConfig cfg = new PluginConfig(worlds, dims, tickInterval, baseDamage, gameModes, requireOnGround,
                 nightMultiplier, smoothTransition, transparentCover, asyncExposureScan, armor, corrosion, feedback,
-                new CommandsConfig(reloadPermission));
+                new CommandsConfig(reloadPermission), antiDust);
         return new LoadResult(cfg, List.of());
     }
 
@@ -480,6 +621,143 @@ public final class PluginConfig {
         return curve;
     }
 
+    // --------------------------------------------------------- anti_dust (v1.2)
+
+    /**
+     * anti_dust 段读取与校验（v1.2）。
+     *
+     * <p>缺省（节点不存在）时走内置默认表，保证「老配置文件升级后抗尘埃药仍可用」；
+     * 显式写了但内容非法则逐条报错并拒绝启动（与其他段同一口径：禁止无校验键）。</p>
+     */
+    private static AntiDustConfig readAntiDust(ConfigurationNode node, List<String> errors) {
+        if (node.virtual()) {
+            return DEFAULT_ANTI_DUST;
+        }
+        boolean enabled = requireBool(node.node("enabled"), true, "anti_dust.enabled", errors);
+        int cooldown = requireInt(node.node("cooldown-seconds"), 20, "anti_dust.cooldown-seconds", errors);
+        if (cooldown < 0) {
+            errors.add("anti_dust.cooldown-seconds=" + cooldown + " 非法：冷却秒数必须 ≥ 0（0 = 无冷却）");
+        }
+        List<String> cures = new ArrayList<>();
+        ConfigurationNode curesNode = node.node("cures");
+        if (!curesNode.virtual()) {
+            for (Object raw : readScalarList(curesNode, "anti_dust.cures", errors)) {
+                String name = String.valueOf(raw).trim().toUpperCase(Locale.ROOT);
+                if (!isKnownEffect(name)) {
+                    // 注意措辞：这里只校验「是不是一个合法的标识符名」，**没有**校验该效果是否真实存在
+                    // （PotionEffectType 的有效性只能靠运行期 Registry 解析）。别把错误信息写成
+                    // 「未知状态效果」，否则服主会以为写错名字也会被拦下——实际不会。
+                    errors.add("anti_dust.cures 含非法状态效果名 \"" + raw + "\"：只允许大写标识符"
+                            + "（如 POISON / HUNGER / NAUSEA；拼错的名字不会被拦下，只会运行时静默跳过）");
+                    continue;
+                }
+                cures.add(name);
+            }
+        }
+        String mark = requireString(node.node("hud-immume-mark"), "◆抗尘", "anti_dust.hud-immume-mark", errors);
+        if (mark.isBlank()) {
+            errors.add("anti_dust.hud-immume-mark 不能为空：免疫期间 HUD 需要一段可辨识的抗性文本");
+        }
+
+        List<DustLevel> levels = new ArrayList<>();
+        Set<String> claimed = new TreeSet<>();
+        ConfigurationNode levelsNode = node.node("levels");
+        if (levelsNode.virtual()) {
+            return new AntiDustConfig(enabled, Math.max(0, cooldown), List.copyOf(cures),
+                    mark.isBlank() ? "◆抗尘" : mark, DEFAULT_ANTI_DUST.levels());
+        }
+        for (Map.Entry<Object, ? extends ConfigurationNode> entry : levelsNode.childrenMap().entrySet()) {
+            String id = String.valueOf(entry.getKey()).trim();
+            ConfigurationNode level = entry.getValue();
+            String label = "anti_dust.levels." + id;
+
+            String displayName = requireString(level.node("display-name"), "", label + ".display-name", errors);
+            if (displayName.isBlank()) {
+                errors.add(label + ".display-name 不能为空：这是玩家在物品栏里看到的名字");
+            }
+            String color = requireString(level.node("color"), "#FFFFFF", label + ".color", errors);
+            if (!HEX_COLOR.matcher(color).matches()) {
+                errors.add(label + ".color=\"" + color + "\" 非法：必须是 #RRGGBB（如 #63D19B）");
+            }
+            double reduction = requireDouble(level.node("reduction"), 0.0, label + ".reduction", errors);
+            if (reduction <= 0.0 || reduction > 100.0) {
+                errors.add(label + ".reduction=" + fmt(reduction)
+                        + " 非法：服药降低的腐蚀值必须位于 (0,100] 百分点区间");
+            }
+            int immune = requireInt(level.node("immune-seconds"), 0, label + ".immune-seconds", errors);
+            if (immune < 0) {
+                errors.add(label + ".immune-seconds=" + immune + " 非法：免疫时长必须 ≥ 0（0 = 只降腐蚀不免伤）");
+            }
+            List<String> items = new ArrayList<>();
+            for (Object raw : readScalarList(level.node("items"), label + ".items", errors)) {
+                String name = String.valueOf(raw).trim().toUpperCase(Locale.ROOT);
+                if (!isKnownMaterial(name)) {
+                    errors.add(label + ".items 含未知物品 \"" + raw + "\"：必须是合法 Material 枚举名");
+                    continue;
+                }
+                if (!claimed.add(name)) {
+                    errors.add(label + ".items 中的 " + name + " 已被更靠前的档位认领："
+                            + "同一作物只能属于一个档位（档位顺序 = 由强到弱，取首个匹配）");
+                    continue;
+                }
+                items.add(name);
+            }
+            if (items.isEmpty()) {
+                errors.add(label + ".items 不能为空：该档位至少需要一种农作物");
+            }
+            levels.add(new DustLevel(id, displayName, color, reduction, Math.max(0, immune), List.copyOf(items)));
+        }
+        if (levels.isEmpty()) {
+            errors.add("anti_dust.levels 不能为空：至少配置一个档位，否则抗尘埃药无法制作");
+        }
+        return new AntiDustConfig(enabled, Math.max(0, cooldown), List.copyOf(cures),
+                mark.isBlank() ? "◆抗尘" : mark, List.copyOf(levels));
+    }
+
+    /** #RRGGBB 十六进制颜色（校验用）。 */
+    private static final java.util.regex.Pattern HEX_COLOR =
+            java.util.regex.Pattern.compile("^#[0-9A-Fa-f]{6}$");
+
+    /**
+     * 状态效果名合法性（无需运行中服务器：{@code PotionEffectType} 是注册表条目常量，
+     * 用 {@code Registry} 查询需要服务器；此处退化为「非空 + 全大写标识符」的可编译期校验，
+     * 真正的有效性由运行期 {@code Registry.EFFECT} 解析兜底，解析失败仅记警告不拒载）。
+     */
+    private static boolean isKnownEffect(String name) {
+        return IDENTIFIER.matcher(name).matches();
+    }
+
+    /** 物品枚举名合法性（枚举常量查找，无需服务器）。 */
+    private static boolean isKnownMaterial(String name) {
+        for (org.bukkit.Material m : org.bukkit.Material.values()) {
+            if (m.name().equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 大写标识符（PI_GRES/UNDEAD 这类带下划线/数字的也可）。 */
+    private static final java.util.regex.Pattern IDENTIFIER =
+            java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
+
+    /** 缺省（配置里没有 anti_dust 段）时使用的内置默认值，与 resources/config.yml 保持一致。 */
+    private static final AntiDustConfig DEFAULT_ANTI_DUST = new AntiDustConfig(
+            true, 20,
+            List.of("POISON", "HUNGER", "NAUSEA", "WEAKNESS", "SLOWNESS"),
+            "◆抗尘",
+            List.of(
+                    new DustLevel("refined", "精制抗尘埃药", "#8FE3C4", 50.0, 30,
+                            List.of("GOLDEN_CARROT", "CHORUS_FRUIT", "GLOW_BERRIES", "ENCHANTED_GOLDEN_APPLE")),
+                    new DustLevel("strong", "强效抗尘埃药", "#63D19B", 35.0, 20,
+                            List.of("NETHER_WART", "CRIMSON_FUNGUS", "WARPED_FUNGUS", "SWEET_BERRIES")),
+                    new DustLevel("improved", "改良抗尘埃药", "#C8B560", 25.0, 15,
+                            List.of("PUMPKIN", "MELON_SLICE", "SUGAR_CANE", "COCOA_BEANS",
+                                    "BROWN_MUSHROOM", "RED_MUSHROOM")),
+                    new DustLevel("crude", "粗制抗尘埃药", "#9AA35A", 15.0, 10,
+                            List.of("WHEAT", "CARROT", "POTATO", "BEETROOT", "KELP", "DRIED_KELP",
+                                    "BAMBOO", "CACTUS"))));
+
     /** feedback.protocol-lib 校验（M3 新键）：auto | true | false，缺省 AUTO（§1.5/§5.2）。 */
     private static ProtocolLibMode readProtocolLibMode(ConfigurationNode node, List<String> errors) {
         if (node.virtual()) {
@@ -503,6 +781,21 @@ public final class PluginConfig {
         if (node.virtual()) {
             return Collections.unmodifiableMap(out);
         }
+        // 结构性校验（v1.2）：本方法只吃「键 → 数值」的映射。若服主把整段写成列表或裸标量
+        // （例如把 `slot-weights: {…}` 误改成多行标量、或把 inline map 换成 `- helmet: 0.1`），
+        // 旧实现会因为 childrenMap() 为空而**静默套用默认值**——配置看起来生效了，实际完全没读进去。
+        // 这种「静默忽略」比报错更难查，所以这里显式拒绝。
+        if (node.childrenMap().isEmpty()) {
+            if (!node.childrenList().isEmpty()) {
+                errors.add(label + " 结构非法：期望 {键: 数值} 映射，实际是列表");
+            } else if (node.rawScalar() != null) {
+                errors.add(label + " 结构非法：期望 {键: 数值} 映射，实际是单个值 \""
+                        + node.rawScalar() + "\"");
+            } else {
+                errors.add(label + " 结构非法：期望 {键: 数值} 映射，实际为空节点");
+            }
+            return Collections.unmodifiableMap(out);
+        }
         for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
             String keyRaw = String.valueOf(entry.getKey()).trim();
             String key = upperCaseKeys
@@ -522,6 +815,18 @@ public final class PluginConfig {
                 continue;
             }
             out.put(key, value);
+        }
+        // 缺键提示：不算错误（默认值仍然可用），但必须让服主知道「你以为改了、其实没写」
+        // 注意：out 是 defaults 的副本，所以必须对照「配置文件里实际出现的键」而不是 out 的键集
+        Set<String> present = new TreeSet<>();
+        for (Object raw : node.childrenMap().keySet()) {
+            String k = String.valueOf(raw).trim();
+            present.add(upperCaseKeys ? k.toUpperCase(Locale.ROOT) : k.toLowerCase(Locale.ROOT));
+        }
+        for (String allowed : new TreeSet<>(allowedKeys)) {
+            if (!present.contains(allowed)) {
+                errors.add(label + " 缺少键 \"" + allowed + "\"：将使用默认值（若这是笔误，请检查拼写）");
+            }
         }
         return Collections.unmodifiableMap(out);
     }
