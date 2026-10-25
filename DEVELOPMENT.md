@@ -1,9 +1,25 @@
 # RadSurvival 开发文档
 
-> 面向**维护者与二次开发者**。使用者请看 [README.md](README.md)，设计规格与决策记录看
-> [plan.md](plan.md)，实机验收证据看 [ACCEPTANCE.md](ACCEPTANCE.md)。
+> 面向**维护者与二次开发者**。使用者请看 [README.md](README.md)，只看配置/命令/API 看
+> [ADVANCED.md](ADVANCED.md)，设计规格与决策记录看 [plan.md](plan.md)，实机验收证据看
+> [ACCEPTANCE.md](ACCEPTANCE.md)。
 >
-> 最后更新：2026-10-25（v1.1 判定链路加固：摘甲结算 + 太阳伤害门控 + reload 解绑）
+> 最后更新：2026-10-25（补充 CI/CD 工作流、架构决策记录、扩展点速查）
+
+---
+
+## 0. 上手路径（新维护者从这里开始）
+
+| 顺序 | 做什么 | 耗时 |
+|---|---|---|
+| 1 | 跑通 `mvn -B clean package`，确认 **188 条全绿** | ~2 min |
+| 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
+| 3 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
+| 4 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
+| 5 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
+
+> **最容易被忽略的一条**：本插件的伤害数字**不是**靠 `DamageType` 区分的，
+> 而是靠「结算瞬间摘掉盔甲 + 时间窗标记」这套机制。看到相关代码觉得绕，先读 §4.2。
 
 ---
 
@@ -43,10 +59,19 @@ com.ft.radsurvival
 │   ├── PlayerRadState     单玩家结算镜像（HUD/调试读口）
 │   └── RadiationServices  六单例容器（reload 时整体重建）
 ├── feedback/              表现层（HUD 双条 / 阶段播报 / 粒子音效 / BossBar / 红闪抑制）
-├── listener/              会话生命周期、事件+PDC、伤害标记、伤害门控、死亡文案
+├── listener/              5 个监听器，职责严格分离：
+│   ├── PlayerSessionListener    join/quit/death：状态预填、PDC 落盘、离线清理
+│   ├── RadiationMarkListener    在事件瞬态 PDC 打 radsurvival:source=radiation 标记
+│   ├── SunRadiationListener     ★伤害门控：SunMark 时间窗 + classify 认领太阳伤害
+│   │                            + restoreVanillaDefense 补偿外部伤害的原版减免
+│   ├── DamageTagListener        死亡文案：时间窗 + GENERIC 无实体双判据
+│   └── (FeedbackService 兼作监听器) 受击反馈挂点
 ├── placeholder/           PlaceholderAPI 扩展（缺失时零加载）
 └── api/                   对外扩展点（事件 + 门面）
 ```
+
+> 注册顺序在 `RadSurvivalPlugin#onEnable`，共 5 处 `registerEvents`。
+> **SunRadiationListener 必须用 LOWEST 优先级**——它要先于第三方插件看到原始伤害值。
 
 **分层铁律**
 
@@ -274,6 +299,38 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 **收益远低于维护与事故成本**。若确有需求，请用成熟商业混淆器对**独立 jar** 离线处理，
 并完整走一遍第 9 节检查单 + 实机验收。
 
+### 10.2 CI/CD 工作流（`.github/workflows/build-release.yml`）
+
+推送到 `main` / 手动触发 → 构建 + 全量测试 + 发布 Release；PR 只构建不发布。
+
+**产物命名**：`RadSurvival-<yyyy>-<MM>-<dd>-<当天第几次构建>.jar`，如 `RadSurvival-2026-10-25-3.jar`。
+
+| 决策 | 原因 |
+|---|---|
+| 序号 = 当天**已成功完成**的构建数 + 1 | 用「已触发」会在并发排队时让两个 run 抢到同一个号 |
+| 日期按 Asia/Shanghai 分桶 | Runner 是 UTC，直接 `date` 会跨日错位 |
+| 用 `jq` 的 `fromdateiso8601 \| . + 28800 \| strftime(...)` 而非 `date -d` | `date -d` 在各种实现下行为不一致（Git Bash 的 `date -u` 实测不换算时区），jq 是确定性的 |
+| `-Drevision=<yyyy-MM-dd-N>` 注入 `plugin.yml` | 让游戏内 `/version` 与下载文件名一致；本地不传该参数则仍是 `1.0.0-SNAPSHOT` |
+| 门禁：测试数 ≥ 100 | 防配置漂移导致 Surefire 静默跳过测试、坏包照发 |
+| `concurrency.cancel-in-progress: false` | 中途取消会让序号出现空洞 |
+
+**踩过的坑**
+
+| 坑 | 教训 |
+|---|---|
+| `.gitignore` 写了未锚定的 `config/` | 连带忽略 `src/main/java/.../config/` 源码包 → CI 报 `package does not exist`。**排除目录必须锚定根目录**（`/config/`） |
+| Windows 上 git 默认 CRLF | Actions 的 `run:` 块遇 `\r` 报 `unexpected character` → 必须用 `.gitattributes` 钉 `eol=lf` |
+| 本地 `mvn` 绿 ≠ CI 绿 | 本地有 `.m2` 缓存与未入库文件，**必须真跑一次 CI** 才算验证 |
+
+> **排查 CI 的常用命令**
+> ```powershell
+> gh run list --limit 5
+> gh run view <id> --log-failed            # 只打失败步骤
+> gh run watch <id> --exit-status          # 阻塞等待并取退出码
+> ```
+> 注意：PowerShell 里给 `gh --jq` 传含空格/引号的表达式容易被拆参，
+> 稳妥写法是 `gh ... --json x | ConvertFrom-Json` 再用管道处理。
+
 ### 10.3 v1.1 判定链路加固（四处真实缺陷）
 
 > 起因：一次「排查代码确定功能真实可用」的复核。全部结论均以**真实 1.21.11 客户端 + Paper 132**
@@ -346,15 +403,18 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 ## 12. 交接说明（给下一位维护者）
 
 **当前状态**：M1–M4 完成并实机验收；命令层与日志优化已完成并验证；构建混淆已评估并
-**明确放弃**；v1.1 判定链路加固已完成（188 条测试全绿）。
+**明确放弃**；v1.1 判定链路加固已完成（188 条测试全绿）；CI/CD 自动发行已上线
+（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
-**可直接使用的产物**（三处哈希一致，已通过 Paper 1.21.11-132 实机验收）：
+**产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
 
 ```
-target/RadSurvival.jar
-dist/RadSurvival-1.0.0-SNAPSHOT.jar
-test-server/plugins/RadSurvival-1.0.0-SNAPSHOT.jar
+GitHub Releases（唯一发布源）
+  └── RadSurvival-<yyyy>-<MM>-<dd>-<N>.jar  +  .jar.sha256
 ```
+
+本地构建仍产出 `target/RadSurvival.jar`（版本号 `1.0.0-SNAPSHOT`），仅用于自测与实机冒烟。
+`test-server/` **不入库**（世界存档 + 明文凭据），验证脚本在 [tools/](tools/)。
 
 **接手后第一件事**：跑一次 `mvn -B clean package` 确认 188 条全绿。
 
@@ -388,3 +448,113 @@ test-server/plugins/RadSurvival-1.0.0-SNAPSHOT.jar
 - 不要在异步线程读方块/区块/玩家状态（会触发 Paper 线程断言）。
 
 **待办候选**：见 §11（§7 品牌自适应 Profile 优先级最高）。
+
+---
+
+## 13. 扩展点速查（按需求找位置）
+
+### 13.1 常见改动配方
+
+| 需求 | 改哪里 | 连带要改 | 验证方式 |
+|---|---|---|---|
+| 加配置项 | `PluginConfig` 的校验 + record | `config.yml`（**两处必须同步**） | `PluginConfigValidationTest` + `/rad reload --dry-run` |
+| 加子命令 | `SubCommand` 枚举 | `RadCommand.onCommand` / `onTabComplete` 两个 switch | `RadCommandMockBukkitTest` |
+| 调伤害公式 | `RadiationMath`（纯函数） | — | `SurvivalBudgetRegressionTest` 会失败 → 说明预算表要重排 |
+| 改盔甲模型 | `ArmorCalculator` | `config.yml` 的 `armor.*` | `ArmorCalculatorTest` |
+| 改腐蚀放大曲线 | `RadiationMath` 的 curve 分支 | `corrosion.curve` 合法值集合 | `RadiationMathTest` |
+| 改 HUD 显示 | `HudRenderer`（纯函数） | 新宽字符要加进 `WIDE_SYMBOLS` | `HudRendererTest` |
+| 加表现层效果 | `FeedbackService` | 用完要能在 `shutdown()` 解绑 | `CorrosionStageFeedbackMockBukkitTest` |
+| 改露天判定 | `SunExposureChecker`（内核）+ 适配层 | 异步路径见 §8 | `SunExposureCheckerTest` |
+| 加对外事件 | `api/` 包 | 只加不改，保持二进制兼容 | `RadiationExposureEventChainTest` |
+
+### 13.2 可直接注入的测试缝
+
+| 缝 | 位置 | 用途 |
+|---|---|---|
+| `RadiationTask.ExposureResolver` | 露天判定 | 绕开 MockBukkit 未实现的 `BlockData#isOccluding` |
+| `DamageApplier.DamageExecutor` | 真实掉血 | 绕开 MockBukkit 未实现的 `damage(double, DamageSource)` |
+| `SunExposureChecker.ScanDispatcher` | 异步补扫 | 单测注入直连/队列执行器，生产传 `runTaskAsynchronously` |
+| `SunRadiationListener` 的 `LongSupplier clock` | 时间窗判定 | 免 sleep 测窗口过期 |
+| `CorrosionMeter` 阶段回调 | 阶段播报 | 记录/断言跨阈值 |
+
+> 除这些缝之外，**过滤链 / 腐蚀步进 / 免疫短路 / 事件链 / 伤害全部走生产代码**——
+> 测试不是在测替身。加新缝时请守住这条，别把核心逻辑也 mock 掉。
+
+### 13.3 reload 时必须成对处理的东西
+
+`/rad reload` 会**整体重建** `RadiationServices`，凡是「注册到旧实例上的回调」都必须解绑，
+否则旧实例被持续调用（内存泄漏 + 日志重影 + 双重播报）。
+
+| 注册 | 解绑 | 守它的测试 |
+|---|---|---|
+| `CorrosionMeter.addStageListener(...)` | `removeStageListener(同一个引用)` | `DamageChannelAndReloadMockBukkitTest` |
+| `DamageApplier.setDamageFeedbackHook(...)` | `setDamageFeedbackHook(null)` | 同上 |
+| `PlaceholderBridge.registerIfAvailable(...)` | `PlaceholderBridge.unregister()` | 同上（无 PAPI 时验证静默） |
+| HUD/BossBar 周期任务 | `cancel()` + 移除 BossBar | `CorrosionStageFeedbackMockBukkitTest` |
+
+**写法约定**：构造函数里把回调存成字段（`hookRef` / `stageRef`），解绑时用**同一个字段**，
+不要现场写新的 lambda——新 lambda 的引用不同，`remove` 会静默失败。
+
+---
+
+## 14. 架构决策记录（ADR 摘要）
+
+只记「为什么这样选」和「什么情况下该推翻它」。
+
+### ADR-1 伤害走 `DamageType.GENERIC` + 结算瞬间摘甲
+
+- **背景**：需要伤害不被原版护甲二次减免，但 1.21.11 没有能表达「无视护甲」的稳定伤害类型。
+- **选择**：`damage(amount, DamageSource)` 前后把四件盔甲从装备槽移出/放回。
+- **代价**：每次结算有 2 次装备槽写入；必须在 `onDisable` 兜底还原（`restoreSuspendedArmorAll()`）。
+- **推翻条件**：若未来 Paper 提供稳定的「忽略护甲」伤害属性，立即改用，摘甲机制整体删除。
+
+### ADR-2 不用 `PlayerLoginEvent`
+
+- **代价**：玩家数据只能在 `PlayerJoinEvent` 恢复，比登录阶段晚。
+- **原因**：监听登录事件会让 Paper 禁用 re-configuration API（`[HorriblePlayerLoginEventHack]`），
+  对需要 `/reload config` 的服务器是硬伤。
+- **推翻条件**：Paper 移除该限制，且确有「join 前就要拦截」的需求。
+
+### ADR-3 腐蚀值内存权威 + 每轮变化即写 PDC
+
+- **选择**：内存是唯一真值，PDC 只是持久化副本；值变化就写，不等 quit。
+- **代价**：写放大（仅变化时写，且免疫/满值玩家零写）。
+- **推翻条件**：出现高频写入导致的 TPS 问题（届时改为节流写 + `onDisable` 强制刷盘）。
+
+### ADR-4 露天扫描异步化的边界
+
+- **选择**：只把**方块扫描**放异步；`damage()` / 事件 / 粒子 / actionbar / PDC 全留主线程。
+- **原因**：Paper 对异步读区块有断言，异步触达玩家状态会直接抛异常。
+- **兜底**：异步任务内异常一律吞掉、不发布、下轮重试（宁可慢一轮，不可污染主线程）。
+
+### ADR-5 发布产物用 shade+relocate 而非 `libraries:`
+
+- **背景**：Paper 的 `libraries:` 走 `maven-central.storage-download.googleapis.com`，
+  本环境被重置 → `Error resolving libraries` → 插件**直接拒载**。
+- **选择**：默认 fat jar，Caffeine/Configurate 等 relocate 到 `com.ft.radsurvival.lib.*`。
+- **代价**：产物 ~1.8 MB。
+- **推翻条件**：目标服务器环境能稳定访问该镜像，且希望减小下载体积 → 用 `-Plibraries-channel`。
+
+---
+
+## 15. 文档维护约定
+
+四个文档职责不重叠，改完代码请对照下表决定更新哪一份：
+
+| 文档 | 面向 | 写什么 | 不写什么 |
+|---|---|---|---|
+| [README.md](README.md) | 玩家/服主 | 玩法、安装、命令、权限、FAQ | 任何 API 名、包名、测试细节 |
+| [ADVANCED.md](ADVANCED.md) | 进阶服主/插件作者 | 完整配置表、结算语义、API/事件、排错 | 内部实现细节、踩坑过程 |
+| **DEVELOPMENT.md**（本文） | 维护者 | 包结构、链路、测试、构建、**踩坑**、ADR | 面向玩家的玩法介绍 |
+| [plan.md](plan.md) | 设计者 | 原始规格与需求 | 实现现状（会过时） |
+| [ACCEPTANCE.md](ACCEPTANCE.md) | 验收者 | 实机证据、裁决结论 | 设计意图 |
+
+**硬性要求**
+
+1. 改了数值口径 → 同步 §3、ADVANCED §6、`SurvivalBudgetRegressionTest`，**三处必须一致**。
+2. 新增踩坑 → 进 §10，写清「现象 / 根因 / 正确做法」，别只写结论。
+3. 新增回归测试 → 注释里写明**钉的是哪个 bug**，否则下一个人会删掉它。
+4. 改了 CI 行为 → 同步 §10.2 与本表。
+
+> **文档里的相对链接请检查锚点**：GitHub 把标题转锚点时**会去掉点号**，
+> `### 3.2 armor — 盔甲减免` → `#32-armor-盔甲减免`（不是 `#3-2-...`）。改标题后旧链接会失效。
