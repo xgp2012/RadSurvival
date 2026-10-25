@@ -323,6 +323,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | `damage(double, DamageCause)` | 1.21.11 已移除 → 改用 `DamageSource` + `DamageType.GENERIC` |
 | MockBukkit 坐标 | `com.github.seeseemelk` 旧包钉死 1.21.1 会崩 → 用 `org.mockbukkit.mockbukkit:mockbukkit-v1.21:4.116.3` |
 | 段缓存布尔误判 | 旧实现缓存"是否露天"→ 同段不同眼位互相污染；现缓存**顶遮挡高度**，任意 eyeY 精确派生 |
+| **段缓存 y 键冗余（v1.3）** | 缓存键含 `sectionY` → 跨段界重扫 + 段间结果互相覆盖（判定抖动）。已改为按方块列缓存、整列扫描，见 §10.4 |
 | HUD 陈旧镜像 | 旧实现读结算镜像，被过滤轮次不刷新 → 改读 `previewRound` 实时快照 |
 | 腐蚀只在 quit 落盘 | 强杀丢整段会话 → 改为**每轮值变化即写** PDC |
 | **原版护甲二次减免（v1.1 修复）** | GENERIC **走**护甲减免（旧验收用裸僵尸测出的"不吃甲"是空甲巧合）→ 双重减免 + 安全区伤害被吞成 0。改为结算瞬间摘甲/还甲 + 太阳伤害门控，详见 10.3 |
@@ -330,6 +331,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | **`PlayerLoginEvent` 的能力代价** | 任何插件监听它都会让 Paper 打印 `[HorriblePlayerLoginEventHack]` 并使 re-configuration API 失效 → **本项目刻意不监听**；异步登录阶段触达玩家状态会触发线程断言 |
 | **`getState()` 是快照（v1.2 踩坑）** | 对 `block.getState()` 的容器 `setItem` 后 `update()` 不保证生效，且「读中心格→写回剩余」会互相覆盖。容器读写统一走 `BlockInventoryHolder#getInventory()`（`DustCraftStructure.inventoryOf`） |
 | **`org.bukkit.Tag` 需注册表（v1.2 踩坑）** | 纯 JUnit 下 `Tag.ANVIL` 静态初始化直接 `ExceptionInInitializerError`。用 Tag 的判定只能放 `mockbukkit/` 测 |
+| **露天缓存键含 y 段 → 判定抖动 + 重复整列扫描（v1.3 修复）** | 顶遮挡是**整列**属性，与眼高无关。旧 `ColumnKey` 把 `sectionY` 编进键：① 玩家上下移动跨过 16 格段界（默认眼高 1.62=第4段、蹲下 1.27=第3段）即换键 → 每轮重新自上而下扫整列；② 同一列被不同 y 段各扫一次，各自写入「**从该段底起算**的顶遮挡」，无遮挡段算出互不相同的偏高哨兵 → 同一列上判定来回切换，玩家体感「明明头顶没方块却掉血 / 一下安全一下不安全」。修复：键改为 `ColumnKey(world, sectionX, sectionZ)`，扫描统一从 `columnScanStartY()`（= 0−1，低于任何可放置方块）起算整列。**任何「按段缓存派生量」的缓存都要问一句：这个派生量与段的哪些轴真正相关？** |
 | **`CommandOutput.percent` 收的是比例** | 传 `0.72` 输出 `72%`；早期误乘 100 导致 `/rad status` 印出 `7200%`（测试抓到） |
 | **原版 `USE_COOLDOWN` 不能写在自定义药水上** | 它的冷却分组是原版共享的，写进去会和原版食物/药水互相卡冷却。冷却靠取消 `PlayerItemConsumeEvent`（取消不掉物品）自管 |
 | **构建混淆（ProGuard）** | **不可行，已放弃**，详见下节 |
@@ -576,7 +578,7 @@ GitHub Releases（唯一发布源）
 |---|---|
 | 伤害数值 / 曲线 | `core/RadiationMath`（纯函数，改完跑 `SurvivalBudgetRegressionTest`） |
 | 判定过滤条件 | `core/RadiationTask` 的过滤链（①~⑦ 链路见 §3） |
-| 露天判定/缓存策略 | `core/SunExposureChecker` + `config.yml` 的 `async-exposure-scan` |
+| 露天判定/缓存策略 | `core/SunExposureChecker` + `config.yml` 的 `async-exposure-scan`（v1.3：缓存的键必须是判决真正依赖的轴——顶遮挡只与 x/z 列有关） |
 | 外部伤害与原版护甲的交互 | `listener/SunRadiationListener`（门控 + `classify`） |
 | 新增配置项 | `config/PluginConfig` + `src/main/resources/config.yml` **两处都要改**，并跑配置校验测试 |
 | 新增子命令 | `command/SubCommand` 枚举 → `RadCommand` 的 `onCommand` / `onTabComplete` |

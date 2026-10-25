@@ -121,17 +121,18 @@ class SunExposureCheckerTest {
     // ---------------------------------------------------------------- 段键
 
     @Test
-    @DisplayName("ColumnKey：16^3 分段（负坐标 floorDiv 正确归段）；同段同键、跨段异键、世界隔离")
+    @DisplayName("ColumnKey：按方块列（x/z 的 16 格段）归档，floorDiv 负坐标正确；y 不参与（v1.3 修正）")
     void columnKeySectioning() {
-        assertThat(ColumnKey.of(WORLD, 0, 64, 0)).isEqualTo(ColumnKey.of(WORLD, 15, 70, 15)); // 同段共享
-        assertThat(ColumnKey.of(WORLD, 16, 64, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 64, 0)); // x 跨段
-        assertThat(ColumnKey.of(WORLD, -1, 64, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 64, 0)); // 负坐标独立段
-        assertThat(ColumnKey.of(WORLD, -16, 64, -16)).isEqualTo(ColumnKey.of(WORLD, -1, 64, -1)); // 负坐标均归 (-1,4,-1) 段
-        assertThat(ColumnKey.of(WORLD, -16, -16, -16)).isEqualTo(ColumnKey.of(WORLD, -1, -1, -1)); // y 负段同理
-        assertThat(ColumnKey.of(WORLD, -16, -16, -16)).isNotEqualTo(ColumnKey.of(WORLD, 0, 0, 0)); // -1 段 ≠ 0 段
-        assertThat(ColumnKey.of("world_the_end", 0, 64, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 64, 0));
-        // y 段界：63 → 段 3，64 → 段 4，不共享
-        assertThat(ColumnKey.of(WORLD, 0, 63, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 64, 0));
+        assertThat(ColumnKey.of(WORLD, 0, 0)).isEqualTo(ColumnKey.of(WORLD, 15, 15)); // 同列共享
+        assertThat(ColumnKey.of(WORLD, 16, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 0)); // x 跨段
+        assertThat(ColumnKey.of(WORLD, -1, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 0)); // 负坐标独立列
+        assertThat(ColumnKey.of(WORLD, -16, -16)).isEqualTo(ColumnKey.of(WORLD, -1, -1)); // 负坐标均归 (-1,-1)
+        assertThat(ColumnKey.of("world_the_end", 0, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 0));
+        assertThat(ColumnKey.of(WORLD, 0, 0)).isNotEqualTo(ColumnKey.of(WORLD, 0, 16)); // z 跨段
+        // v1.3 回归钉子：y 不参与键。旧实现把 sectionY 编进键，63/64 分属两段 → 两键，
+        // 玩家蹲下/站起跨过段界就整列重扫，且两段各自算出不同的哨兵值导致判定来回切换。
+        assertThat(ColumnKey.of(WORLD, 0, 63, 0)).isEqualTo(ColumnKey.of(WORLD, 0, 64, 0));
+        assertThat(ColumnKey.of(WORLD, 0, 1, 0)).isEqualTo(ColumnKey.of(WORLD, 0, 300, 0));
     }
 
     // ---------------------------------------------------------------- 缓存行为
@@ -162,7 +163,7 @@ class SunExposureCheckerTest {
     }
 
     @Test
-    @DisplayName("段内精确度（判定链路强化）：缓存存顶遮挡高度，同段不同 eyeY 各自正确，且仍只扫描一次")
+    @DisplayName("段内精确度（判定链路强化）：缓存存顶遮挡高度，同列不同 eyeY 各自正确，且仍只扫描一次")
     void sectionValueResolvesPerEyeHeight() {
         AtomicLong clock = new AtomicLong(0L);
         SunExposureChecker checker = cached(clock, true);
@@ -193,18 +194,18 @@ class SunExposureCheckerTest {
             scans.incrementAndGet();
             return false;
         })).isTrue();
-        assertThat(scans.get()).isEqualTo(MAX_HEIGHT - 64);
+        assertThat(scans.get()).isEqualTo(MAX_HEIGHT - (0 - 1));
         // 60.001s 后：条目过期 → 用「遮挡」谓词重扫 → 遮蔽，且自上而下只查到首个（顶）阻挡 70 即停
         clock.set(Duration.ofSeconds(61).toNanos());
         assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, 64, 0, MAX_HEIGHT, y -> {
             scans.incrementAndGet();
             return y == 70;
         })).isFalse();
-        assertThat(scans.get()).isEqualTo((MAX_HEIGHT - 64) + (319 - 70 + 1));
+        assertThat(scans.get()).isEqualTo((MAX_HEIGHT - (0 - 1)) + (319 - 70 + 1));
     }
 
     @Test
-    @DisplayName("缓存隔离：不同段/不同世界的键互不污染；invalidateAll 清空")
+    @DisplayName("缓存隔离：不同列/不同世界的键互不污染；invalidateAll 清空")
     void cacheIsolationAndInvalidate() {
         AtomicLong clock = new AtomicLong(0L);
         SunExposureChecker checker = cached(clock, true);
@@ -215,12 +216,15 @@ class SunExposureCheckerTest {
         };
         checker.isExposed(World.Environment.NORMAL, WORLD, 0, 64, 0, MAX_HEIGHT, counting);
         int perScan = scans.get();
-        // x 跨段 → 新键重扫
+        // x 跨列 → 新键重扫
         checker.isExposed(World.Environment.NORMAL, WORLD, 16, 64, 0, MAX_HEIGHT, counting);
         assertThat(scans.get()).isEqualTo(2 * perScan);
         // 另一世界同坐标 → 新键
         checker.isExposed(World.Environment.NORMAL, "world2", 0, 64, 0, MAX_HEIGHT, counting);
         assertThat(scans.get()).isEqualTo(3 * perScan);
+        // v1.3 回归钉子：同列不同眼高（哪怕跨过 16 格段界）不产生新条目、不重扫
+        checker.isExposed(World.Environment.NORMAL, WORLD, 3, 71, 3, MAX_HEIGHT, counting);
+        assertThat(scans.get()).as("同列换眼高不重扫").isEqualTo(3 * perScan);
         assertThat(checker.cachedEntries()).isEqualTo(3);
         checker.invalidateAll();
         assertThat(checker.cachedEntries()).isZero();
@@ -251,8 +255,57 @@ class SunExposureCheckerTest {
             return SunExposureChecker.blockCountsAsCover(false, y == 150, false); // 仅 150 处一块玻璃
         });
         assertThat(exposed).isTrue();
-        // 扫描区间 = [段底 96, 200)：自上而下 104 格（顶遮挡哨兵=95 < eyeY=100 → 露天）
-        assertThat(scans.get()).isEqualTo(200 - 96);
+        // 无遮挡列：整列从 columnScanStartY() 扫到 maxHeight（v1.3：不再按眼高所在段底起算，
+        // 否则段底以下被跳过、哨兵值偏高，段内低眼位会被误判为遮蔽）
+        assertThat(scans.get())
+                .as("玻璃不算遮蔽（transparentCountAsCover=false）→ 整列扫到底，无提前终止")
+                .isEqualTo(200 - (0 - 1));
+    }
+
+    // ---------------------------------------------------------------- v1.3 判定稳定性回归
+
+    @Test
+    @DisplayName("v1.3 回归：玩家在列内上下移动（跨 16 格段界）不再整列重扫，判定也不抖动")
+    void verticalMovementDoesNotRescanOrFlip() {
+        AtomicLong clock = new AtomicLong(0L);
+        SunExposureChecker checker = cached(clock, true);
+        AtomicInteger scans = new AtomicInteger();
+        // 真实的「屋檐外站台」场景：整列无遮挡 → 任何眼高都必须判露天
+        IntPredicate open = y -> {
+            scans.incrementAndGet();
+            return false;
+        };
+        // 蹲下(眼高 63)、站起(眼高 64)、跳起(眼高 80)、再落回(眼高 63)；63/64 恰好跨 y 段界(3/4)
+        for (int eyeY : new int[] {63, 64, 80, 63, 64}) {
+            assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 5, eyeY, 5, MAX_HEIGHT, open))
+                    .as("列内无遮挡时眼高 %d 必须判露天", eyeY).isTrue();
+        }
+        // 旧实现：63→段3、64→段4 两个键各扫一次，且两次扫描起点不同（16*3+1=49 / 16*4+1=65）
+        int columnScan = MAX_HEIGHT - (0 - 1);
+        assertThat(scans.get())
+                .as("v1.3：同一方块列只扫一次（旧实现跨 y 段会重扫，蹲起即可触发）")
+                .isEqualTo(columnScan);
+    }
+
+    @Test
+    @DisplayName("v1.3 回归：扫描必须是整列——段底以下/眼位以下的空白不能把低眼位误判为遮蔽")
+    void columnScanCoversBelowEyeHeight() {
+        AtomicLong clock = new AtomicLong(0L);
+        SunExposureChecker checker = cached(clock, true);
+        // 整列无遮挡。高眼位先查询会写入该列的顶遮挡哨兵值；
+        // 若哨兵按「眼高所在段底」算，段内更低的眼位就会 getTopCover >= eyeY → 误判遮蔽（漏判危险）
+        assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, 200, 0, MAX_HEIGHT, y -> false))
+                .isTrue();
+        // 同列低眼位（低 130 格，远超一个段）：仍必须露天
+        assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, 70, 0, MAX_HEIGHT, y -> false))
+                .as("低眼位不得因高眼位的扫描起点而误判遮蔽").isTrue();
+        // 反过来：真实顶遮挡 100 时，低于它的眼位必须遮蔽、高于它必须露天（同列、零重扫）
+        SunExposureChecker other = cached(clock, true);
+        IntPredicate cover100 = y -> y == 100;
+        assertThat(other.isExposed(World.Environment.NORMAL, WORLD, 0, 70, 0, MAX_HEIGHT, cover100)).isFalse();
+        assertThat(other.isExposed(World.Environment.NORMAL, WORLD, 0, 150, 0, MAX_HEIGHT, cover100)).isTrue();
+        assertThat(other.isExposed(World.Environment.NORMAL, WORLD, 0, 100, 0, MAX_HEIGHT, cover100))
+                .as("眼位与遮挡同格 = 遮蔽（含眼睛所在格，§1.1）").isFalse();
     }
 
     // ---------------------------------------------------------------- 异步补扫管线（§2 线程模型）

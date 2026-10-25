@@ -25,11 +25,13 @@ import com.github.benmanes.caffeine.cache.Ticker;
  *       单查询语义 {@link #isSkyOpen} 与其等价；方块归类决策 {@link #blockCountsAsCover}
  *       ——均无 Bukkit 服务器依赖；</li>
  *   <li>缓存层（§2 线程模型的异步化落地）：双层 Caffeine——权威层 TTL 60s、容量上限，
- *       键 =「世界名 + 眼睛所在 chunk 段（16^3）」，值为<b>顶遮挡高度</b>：同一区间扫描
- *       结果可对段内任意眼睛高度精确再判定（{@code 露天 ⇔ eyeY > topCover}），消除旧
- *       布尔共享误差（段内低眼位复用高眼位结论会把头顶真实遮挡漏判为露天，反之虚判遮蔽）。
+ *       键 =「世界名 + 方块列（x/z 的 16 格段）」，值为该列的<b>顶遮挡高度</b>，对列内
+ *       任意眼睛高度精确再判定（{@code 露天 ⇔ eyeY > topCover}）。
+ *       <b>v1.3 修正</b>：键不再包含 y 段——顶遮挡是整列属性，与眼高无关。旧键含
+ *       {@code sectionY} 会让玩家上下移动跨过 16 格段界时整列重扫，且同一列被不同 y 段
+ *       各算一次、结果互相覆盖，造成头顶明明没有方块却在两段之间反复切换判定。
  *       段过期后若启用 {@code async-exposure-scan}（默认 true），补扫派发给
- *       {@link ScanDispatcher}（生产 = Bukkit 异步池，段级在途去重），当轮以粘滞层旧值
+ *       {@link ScanDispatcher}（生产 = Bukkit 异步池，列级在途去重），当轮以粘滞层旧值
  *       应答——主线程稳态零方块读取；冷启动仍主线程直算保首轮精确。TTL 时钟经
  *       {@link LongSupplier} 注入，单测可模拟过期与调度；</li>
  *   <li>Bukkit 适配层：{@link #isExposed(World, Location)} 用 {@code BlockData#isOccluding()}
@@ -51,16 +53,60 @@ public final class SunExposureChecker {
     public static final long DEFAULT_MAX_ENTRIES = 8192L;
     /** chunk 段边长：16×16×16（§1.1 按 chunk 段缓存）。 */
     public static final int SECTION_SIZE = 16;
+    /**
+     * 方块列扫描的起点下界（v1.3）：低于 1.21.11 世界里任何可放置/可站立方块的下限。
+     * 取 {@code MIN_BUILD_HEIGHT(0) - 1}：1.21 世界 y 从 -64 起，0 已在其上；更低的方块只可能是
+     * 深板岩/基岩，它们若在玩家头顶之上，扫描自然会在更高的位置先遇到真实遮挡。
+     * 为负 Y 世界留出的余量不必要也不危险——真正需要的是「不高于眼位」，0 满足。
+     */
+    private static final int MIN_BUILD_HEIGHT = 0;
 
-    /** 缓存键：世界名 + 眼睛所在段的三维坐标（floorDiv，负坐标正确归段）。 */
-    public record ColumnKey(String world, int sectionX, int sectionY, int sectionZ) {
+    /**
+     * 缓存键：世界名 + 方块列（x/z 的 16 格段）。
+     *
+     * <p><b>键里刻意不含 y 段（v1.3 修正）</b>：露天判定的扫描结果是<b>整列</b>的顶遮挡高度，
+     * 与眼睛所在高度无关——{@code eyeY > topCover} 对列内任意眼位都精确成立。
+     * 旧实现把 {@code sectionY} 也编进键，造成两个实际后果：</p>
+     * <ol>
+     *   <li><b>重复扫描</b>：玩家上下移动跨过 16 格段界（跳起、阶梯、下蹲）即换键 → 重新
+     *       自上而下扫一遍。默认眼高 1.62 = 第 4 段、眼高 1.27 = 第 3 段，蹲下站起就会在
+     *       两个键之间反复整列重扫；在地面附近上下移动则几乎每轮都在扫；
+     *   <li><b>段间结果互相覆盖</b>：同一列被不同 y 段各扫一次，各自写入「从该段底起算的顶遮挡」。
+     *       扫描起点随段底抬高而变（{@code startYInclusive = 16k + 1}），若列内该区间<b>没有</b>
+     *       遮挡，各段算出的哨兵值互不相同、且都大于真实顶遮挡 → 在同一列上反复切换判定，
+     *       表现为「贴着建筑边缘/进出门时判定时有时无」。
+     * </ol>
+     *
+     * <p>去 y 段后，一列只扫一次、TTL 内零扫描，且同列所有眼位共享<b>同一个</b>顶遮挡高度，
+     * 判定不再抖动。缓存规模由「每 16³ 段一条」降到「每 16×16 列一条」。</p>
+     */
+    public record ColumnKey(String world, int sectionX, int sectionZ) {
 
-        public static ColumnKey of(String world, int blockX, int blockY, int blockZ) {
+        public static ColumnKey of(String world, int blockX, int blockZ) {
             return new ColumnKey(world,
                     Math.floorDiv(blockX, SECTION_SIZE),
-                    Math.floorDiv(blockY, SECTION_SIZE),
                     Math.floorDiv(blockZ, SECTION_SIZE));
         }
+
+        /**
+         * 兼容旧调用（x/y/z 三元组）：<b>y 被忽略</b>——露天判定按方块列缓存，与眼高无关。
+         *
+         * @deprecated 用 {@link #of(String, int, int)}；保留仅为不打断既有调用点。
+         */
+        @Deprecated
+        public static ColumnKey of(String world, int blockX, int blockY, int blockZ) {
+            return of(world, blockX, blockZ);
+        }
+    }
+
+    /**
+     * 列级扫描起点。<b>必须从世界底部（或至少低于任何可站立高度）起算</b>，不能复用眼高
+     * 所在的 16 格段底：段底之上的判据 {@code eyeY > topCover} 只有在 topCover 是<b>整列</b>
+     * 顶遮挡时才成立。用段底会漏掉「段底以下、眼位以上」其实并不存在的方块——无遮挡列因此
+     * 得到一个偏高的哨兵值，段内低眼位会被误判为遮蔽（漏判危险，比误判安全更糟）。
+     */
+    static int columnScanStartY() {
+        return MIN_BUILD_HEIGHT - 1;
     }
 
     // ---------------------------------------------------------------- 纯内核
@@ -230,8 +276,8 @@ public final class SunExposureChecker {
      *       玩法零取舍。</li>
      * </ol>
      *
-     * <p>段粒度只影响扫描起点（多扫不超过 15 格），段内任意 eyeY 由顶遮挡高度精确派生；
-     * 豁免维度（下界/末地）恒短路 false 不扫描（§1.1）。</p>
+     * <p>段粒度只影响 x/z，扫描从 {@link #columnScanStartY()}（世界底部之下）起算整列，
+     * 因此得到的是<b>整列</b>顶遮挡，对任意 eyeY 都精确；豁免维度（下界/末地）恒短路 false 不扫描（§1.1）。</p>
      */
     public boolean isExposed(World.Environment environment, String worldName,
                              int eyeX, int eyeY, int eyeZ, int maxHeight,
@@ -239,31 +285,30 @@ public final class SunExposureChecker {
         if (!appliesTo(environment)) {
             return false; // 豁免维度（下界/末地）：无太阳，恒判“非露天”（§1.1）
         }
-        ColumnKey key = ColumnKey.of(worldName, eyeX, eyeY, eyeZ);
+        ColumnKey key = ColumnKey.of(worldName, eyeX, eyeZ);
         Integer freshTop = freshCache.getIfPresent(key);
         if (freshTop != null) {
-            return eyeY > freshTop; // 权威命中：段内任意眼位精确判定
+            return eyeY > freshTop; // 权威命中：列内任意眼位精确判定（与眼高无关）
         }
         Integer stickyTop = lastKnownCache.getIfPresent(key);
         if (stickyTop != null && asyncDispatcher != null) {
             scheduleAsyncRefresh(key, maxHeight, blockCovers);
             return eyeY > stickyTop; // 补扫在途：沿用上一已知判定（机制不变，新鲜度滞后一轮级）
         }
-        int top = topmostCoverY(maxHeight, key.sectionY() * SECTION_SIZE, blockCovers);
+        int top = topmostCoverY(maxHeight, columnScanStartY(), blockCovers);
         publish(key, top);
         return eyeY > top;
     }
 
-    /** 派发段级异步补扫（在途去重；调度拒绝/扫描异常一律静默，下轮自然重试）。 */
+    /** 派发列级异步补扫（在途去重；调度拒绝/扫描异常一律静默，下轮自然重试）。 */
     private void scheduleAsyncRefresh(ColumnKey key, int maxHeight, IntPredicate blockCovers) {
         if (!inFlight.add(key)) {
-            return; // 同段已有在途补扫，共享结果
+            return; // 同列已有在途补扫，共享结果
         }
-        int sectionBaseY = key.sectionY() * SECTION_SIZE;
         try {
             asyncDispatcher.dispatch(() -> {
                 try {
-                    int top = topmostCoverY(maxHeight, sectionBaseY, blockCovers);
+                    int top = topmostCoverY(maxHeight, columnScanStartY(), blockCovers);
                     publish(key, top);
                 } catch (RuntimeException | Error ex) {
                     // 异步补扫异常（如区块恰被卸载触发 Paper 异步加载防护）：不发布，
