@@ -17,6 +17,7 @@
 | 3 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
 | 4 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
 | 5 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
+| 6 | **要改既有逻辑前**，先看 [§10.5 排查方法论](#105-v12-排查方法论怎么把看起来没问题的代码查出洞) | 8 min |
 
 > **最容易被忽略的一条**：本插件的伤害数字**不是**靠 `DamageType` 区分的，
 > 而是靠「结算瞬间摘掉盔甲 + 时间窗标记」这套机制。看到相关代码觉得绕，先读 §4.2。
@@ -447,23 +448,94 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | 坑 | 事实与结论 |
 |---|---|
 | **这不是配方，是多方块结构** | 用户明确否掉了「数据包 JSON 配方」和「工作台」。`DustCraftStructure` 判的是**世界里真实方块**：核心（发射器/投掷器）+ 正上方铁砧 + 同层 8 邻原木。别改回 `RecipeChoice` 思路 |
-| **「9 格外围一圈中间农作物」指的是容器 UI，不是世界方块** | 8 个原木是世界结构；GUI 里那 9 格是发射器自己的 `Inventory`，外围 8 格只做展示（放置会被拒），中心索引 `4` 才是作物位 |
+| **「9 格外围一圈中间农作物」指的是容器 UI，不是世界方块** | 8 个原木是世界结构；GUI 里那 9 格是发射器自己的 `Inventory`，外围 8 格**只出不进**（放入被取消，取出放行），中心索引 `4` 才是作物位。别写成「只读」——「只读」会让人以为放进去还能拿回来 |
 | **`block.getState()` 返回快照** | 对它 `getInventory().setItem(...)` 再 `update()` 在本环境下不可靠；且「读中心格 → 写回剩余数量」若分两次拿快照会互相覆盖。统一用 `BlockInventoryHolder#getInventory()`（封装成 `DustCraftStructure.inventoryOf`） |
 | **`Tag.ANVIL` / `Tag.LOGS` 需要 Bukkit 注册表** | 纯 JUnit 下静态初始化直接抛 `ExceptionInInitializerError`。用 Tag 的判定只能放进 `mockbukkit/` 测（`DustCraftStructureMockBukkitTest`） |
 | **`org.bukkit.Tag` 的常量名** | 是 `Tag.LOGS`，不是 `Tag.ITEMS_LOGS`（后者不存在）。`Material` 是普通 enum 且实现 `Keyed`，但**不是** `ItemType`，需要时用 `material.asItemType()` |
 | **不能给自定义物品注册新 ID** | Bukkit/数据包都不允许插件造新物品。抗尘埃药 = `HONEY_BOTTLE` 基底 + PDC 档位标识（`radsurvival:dust_level`）+ 组件覆盖外观与行为 |
-| **`USE_COOLDOWN` 不要写** | 它的冷却分组是原版共享的，写进去会与原版食物/药水互相卡冷却。插件的 20s 冷却靠**取消 `PlayerItemConsumeEvent`** 实现——Bukkit 取消该事件**不扣物品**，于是「冷却中喝不掉且不亏东西」自然成立 |
+| **`USE_COOLDOWN` 不要写** | 它的冷却分组是原版共享的，写进去会与原版食物/药水互相卡冷却。插件的 20s 冷却靠**取消 `PlayerItemConsumeEvent`** 实现——按 Bukkit 契约取消该事件时**物品不会被移出背包**（见 ADR-7），于是「冷却中喝不掉且不亏东西」自然成立 |
 | **`CONSUMABLE` 要写、但 `consumeEffects` 留空** | 写它是为了拿到原版饮用动作（动画/音效/扣物品）；效果列表必须空，否则绕过冷却与降腐蚀逻辑 |
 | **`Consumable` 的读口是 `consumeEffects()`** | 不是 `effects()`。API 事实用 `javap -cp target/api-check io.papermc.paper.datacomponent.item.Consumable` 复核，别靠记忆 |
 | **`PotionEffectTypeWrapper.values0()` 不存在** | 枚举效果统一用 `PotionEffectType.getByName(String)` 拿 |
-| **免疫判定必须放在腐蚀步进之后** | 先累后打的口径不能松。免疫窗口内**不步进腐蚀**（既不涨也不靠它降），避免「喝药期间偷偷攒腐蚀」 |
-| **免疫是内存态，quit 要清** | `DustImmunity` 不落盘；`AntiDustListener#onQuit` 同时清免疫与冷却，否则「下线喝药、上线免伤」 |
-| **抗尘埃药的监听器只注册一次** | reload 路径复用实例（两个类都从 `plugin.config()` 动态取配置）。Bukkit `HandlerList` 不支持按实例注销，重复注册会让同一事件被处理多次 |
+| **免疫期间必须「不累积」，不只是「不受伤」** | 这一条**曾经写错过**：免疫判定放在腐蚀步进之后、只做提前 `return`，结果腐蚀照常上涨并落盘，而 HUD 却显示 `◆抗尘`——玩家看得见腐蚀条还在动，与「免疫」二字直接矛盾。正确做法是把免疫翻译成「本轮视作遮蔽」传给结算内核（`settle(id, exposed && !dustImmune, ...)`），让 `step()` 走**恢复分支**。这样「先累后打」的顺序不变，变的只是本轮累积速率取什么值。**任何新增的「免疫/免伤」类机制都要问一句：累积速率归零了吗？** |
+| **免疫是内存态，quit / death 都要清** | `DustImmunity` 不落盘。`AntiDustListener#onQuit` 清冷却，`PlayerSessionListener#onDeath` 清免疫——两处都要，否则「下线喝药上线免伤」「喝药自杀复活免伤」都能白嫖。死亡清理原先漏了，是 v1.2 排查时补的 |
+| **抗尘埃药的监听器只注册一次，但 reload 要换绑 factory** | 两个监听器 reload 时复用实例（都从 `plugin.config()` 动态取配置）。但 `DustCraftGui` 构造时注入的 `DustItemFactory` 内含**旧 `PluginConfig`**，reload 后若不换绑就是「判定用新配置、产出用旧配置」。现由 `installAntiDust` 调 `rebind(factory)` 处理，字段是 `volatile`。关开关时用 `HandlerList.unregisterAll(...)` **真正摘掉**，不能只靠「各 handler 自查配置后 return」——那样发射器会沦为免费 9 格仓库 |
 | **`CommandOutput.percent` 收比例** | `/rad status` 里传 `0.72` 会印 `72%`；乘 100 会印 `7200%`。这个 bug 是被 `statusExplainsCoveredAndNoLongerImmune` 抓到的 |
 | **护甲「完全免疫」已删，`IMMUNE` 枚举保留** | `RoundResult.IMMUNE` 现在是抗尘埃药专用。`PluginConfig` 硬校验任何材质「权重和 × 系数 ≥ 1.0」直接拒载，旧 `NETHERITE: 1.00` 配置会报错 |
 | **HUD 段改名要同步弃用旧常量** | `◆免疫` → `◆抗尘`；旧 `IMMUNE_MARK` 与 `renderLevelBar(..., double)` 重载保留 `@Deprecated`，仅为不打断按字符串匹配的外部插件 |
 | **MockBukkit 的 `displayName()` 带方括号** | 断言物品名用 `contains`，别用 `isEqualTo` |
+| **「先扣后补」是最容易写出刷物品的地方** | 原实现是「先扣作物 → `addItem` → 放不进背包就把**整组原始 stack** 写回去」，等于作物没扣、药水照掉 ⇒ 背包满时**无限刷药**。而且 `addItem` 可能**部分成功**（药水堆叠 8、背包只剩 3 位时塞进 3 个并返回剩下的），旧代码仍把整瓶再 drop 一次 ⇒ 复制。**结论：涉及「消耗 A 产出 B」的路径一律写成「先给 B，确认成功后再扣 A」**；实在要先扣，回滚必须用计算后的剩余量，绝不能写回原始 stack |
+| **取消事件 ≠ 什么都不做** | GUI 里「中心格只收农作物」不能只看 `getCursor()`：Shift+点击（`MOVE_TO_OTHER_INVENTORY`）、数字键（`HOTBAR_SWAP`）、双击收集（`COLLECT_TO_CURSOR`）三条路径的光标都是空的，全部绕过校验。必须按 `ClickType` 分流，对「最终会落到核心容器」的所有路径统一校验。做容器 UI 时请**穷举 `ClickType`**，别只测普通左右键 |
+| **`InventoryMoveItemEvent` 要拦双向** | 只拦 `getDestination()` 是核心，漏斗仍能**从核心抽出**作物，加工台会被自动化搬空。source 或 destination 任一为核心都要取消 |
+| **`RawSlot` 只对顶层容器成立** | `event.getRawSlot() >= 容器大小` 表示点击发生在玩家背包侧；但此时 `event.getInventory()` 仍返回核心容器。两侧都要判断，别只判 `rawSlot < 9` |
 | **RCON 单次只可靠执行一条命令** | 本仓库 `tools/rconlib.ps1` 因首行注释编码损坏而失效（`function` 关键字被吞），需要时临时写独立脚本；`setblock` 到未加载区块会报「That position is not loaded」，先 `forceload add` |
+
+### 10.5 v1.2 排查方法论（怎么把「看起来没问题」的代码查出洞）
+
+v1.2 上线前做了一轮定向排查，从「代码已通过全部测试」的状态里又挖出 **9 个真实缺陷**，
+其中 4 个是玩家立刻能感知的（刷物品、免疫名不副实、死亡保留免疫、一次右键出两瓶）。
+这一节记的是**方法**，不是结论——下次排查照这个清单走。
+
+#### ① 先怀疑「测试绿」本身
+
+测试全绿只说明「测过的路径是对的」，不说明「路径穷举完了」。这次的两个典型案例：
+
+- **假绿 1（容差掩盖错值）**：`SurvivalBudgetRegressionTest#nightNaked` 期望夜晚裸装 `44s`，
+  实际 `37s`。±20% 容差把 37 也兜进去了，所以一直是绿。这个 44 显然来自
+  「白天 22s × 2」的**误推**——夜晚伤害和累积同时减半，但倍率增长被拉长，不能线性翻倍。
+  **对策**：数值断言要同时满足「容差能兜住实现波动」和「兜不住一个数量级推理错误」；
+  拿不准就独立复算一次（写个几十行的裸 Java 主循环，别复用测试自己的 simulate）。
+- **假绿 2（断言没覆盖真实差异）**：给「免疫期间腐蚀不涨」写的第一版回归测试，
+  在**回退修复后依然通过**——因为 MockBukkit 默认判遮蔽，新旧实现在遮蔽下都走恢复分支，
+  测不出差异。改用 `Support.install` 强制露天、并先断言「前提成立（不免疫时确实在涨）」
+  之后才真正生效。
+  **对策**：每条新回归测试都要做一次**反向验证**（临时把修复改回去，确认测试变红）。
+  不做这一步的回归测试，有一半是装饰品。
+
+#### ② 空值 / 边界 / 生命周期三连问
+
+对每个新入口问三句：
+
+1. **空值**：`craft(player, core, anvil)` 是 `public`，命令层和测试都会直接调，
+   传 `null` 会 NPE 吗？`Block#getWorld()` 在卸载世界时是 `null` 吗？
+2. **边界**：`addItem` 部分成功怎么办？背包满怎么办？数量减到 0 怎么办？
+3. **生命周期**：玩家 **quit** 了状态清吗？**death** 呢？**reload** 后旧实例还在被调用吗？
+   **开关关掉**后监听器真的摘了吗（还是只是「自查配置后 return」，容器仍可被滥用）？
+
+这次 9 个缺陷里，有 5 个是第 3 条挖出来的。
+
+#### ③ 「文档说的」和「代码做的」逐条对照
+
+很多缺陷不是逻辑错，是**承诺与实现不符**：
+
+- 注释说「免疫期间零累积增长」，代码只挡了伤害 → 玩家看见腐蚀条还在涨。
+- 注释说「背包满时把作物放回去」，代码写回的是整组原始 stack → 无限刷药。
+- 注释说「关闭开关后行为退回原版」，代码只让 handler 早退 → 发射器成了免费仓库。
+- 注释说「死亡/quit 都清免疫」，代码只清了 quit。
+
+**对策**：排查时把注释当成「需求声明」来读，逐条去代码里找对应语句。
+找不到的那条，就是缺陷。
+
+#### ④ 多路审计 + 人工复核，别照单全收
+
+本次并行跑了三路独立审计（抗尘埃药代码 / 护甲平衡 / 测试与文档一致性），
+交叉验证很有效，但也**报了两条错的**，必须人工复核后才落地：
+
+| 审计结论 | 复核结果 |
+|---|---|
+| 「取消 `PlayerItemConsumeEvent` 不阻止扣物品，冷却期喝药会白亏」 | **错**。官方 Javadoc 原文：*"If the event is cancelled the effect will not be applied and the item will not be removed from the player's inventory."* 原前提成立。但仍加了 `setReplacement()` 双保险 |
+| 「仓库编译不过（缺 `ClickType` import）」 | **错**。审计读到的是编辑中途的中间态，import 一直都在 |
+| 「`readFactorMap` 静默忽略畸形配置」 | **对**，已修（列表/裸标量改报错，缺键给提示） |
+| 「`nightNaked` 期望值错，实际 37s」 | **对**，已修，并把容差收紧到 ±10% |
+
+审计给的是**线索**，不是结论。凡涉及「API 契约」的判断，一律 `javap` 或查官方 Javadoc 复核。
+
+#### ⑤ 批量文本替换必须抽查
+
+这次用脚本把文档里的 `255` 全局替换成 `265` 时，顺手把
+`ACCEPTANCE.md` 里的 RCON 端口 `25565` 改成了 `26565`。
+**对策**：批量替换后 `grep` 一遍替换结果里形似「端口/版本号/坐标」的数字，
+或把替换限定在更长的上下文串上（先替换 `255 条` 而不是裸 `255`）。
 
 ---
 
@@ -561,6 +633,12 @@ GitHub Releases（唯一发布源）
 
 > 除这些缝之外，**过滤链 / 腐蚀步进 / 免疫短路 / 事件链 / 伤害全部走生产代码**——
 > 测试不是在测替身。加新缝时请守住这条，别把核心逻辑也 mock 掉。
+>
+> ⚠️ **注入缝的默认值会影响测试能不能测出东西**：`Support.Fixture.exposed` 默认
+> `true`，但**直接 `MockBukkit.load(RadSurvivalPlugin.class)` 得到的生产 `ExposureResolver`
+> 在 MockBukkit 里恒判遮蔽**（`BlockData#isOccluding` 未实现）。所以想在测试里观察
+> 「露天才发生」的行为（腐蚀累积、辐射掉血），**必须走 `Support.install(...)`**，
+> 否则新旧实现在遮蔽分支下行为相同，测试会「怎么改都绿」（详见 §10.5 ①）。
 
 ### 13.3 reload 时必须成对处理的东西
 
@@ -573,8 +651,13 @@ GitHub Releases（唯一发布源）
 | `DamageApplier.setDamageFeedbackHook(...)` | `setDamageFeedbackHook(null)` | 同上 |
 | `PlaceholderBridge.registerIfAvailable(...)` | `PlaceholderBridge.unregister()` | 同上（无 PAPI 时验证静默） |
 | HUD/BossBar 周期任务 | `cancel()` + 移除 BossBar | `CorrosionStageFeedbackMockBukkitTest` |
-| `DustCraftGui` / `AntiDustListener`（v1.2，**只注册一次**） | 不注销，改为清状态：`antiDustListener.clearCooldowns()` | `AntiDustChainMockBukkitTest` |
-| `DustImmunity`（v1.2） | `services.shutdown()` 调 `clearAll()` | `DustImmunityTest` |
+| `DustCraftGui` / `AntiDustListener`（v1.2，**只注册一次**） | reload 复用实例：清冷却 `clearCooldowns()` + **换绑 factory** `dustGui.rebind(newFactory)`；**关闭开关时**改用 `HandlerList.unregisterAll(...)` 真正摘除 | `AntiDustChainMockBukkitTest` |
+| `DustImmunity`（v1.2） | `services.shutdown()` 调 `clearAll()`；另外 death 与 quit 也要 `clear(uuid)` | `DustImmunityTest` |
+
+> **为什么 reload 也要换绑 factory**：`DustCraftGui` 构造时注入的 `DustItemFactory`
+> 内含当时的 `PluginConfig`。只复用实例不换绑，会出现「判定用新配置、产出用旧配置」——
+> 改了档位表的减免/时长/作物归属后，合成出的药水 Lore 与 PDC 仍是旧值。
+> 这是 §13.3 里唯一一个「监听器不用重建、但它持有的对象要换」的例子。
 
 **写法约定**：构造函数里把回调存成字段（`hookRef` / `stageRef`），解绑时用**同一个字段**，
 不要现场写新的 lambda——新 lambda 的引用不同，`remove` 会静默失败。
@@ -649,15 +732,24 @@ GitHub Releases（唯一发布源）
 | [README.md](README.md) | 玩家/服主 | 玩法、安装、命令、权限、FAQ | 任何 API 名、包名、测试细节 |
 | [ADVANCED.md](ADVANCED.md) | 进阶服主/插件作者 | 完整配置表、结算语义、API/事件、排错 | 内部实现细节、踩坑过程 |
 | **DEVELOPMENT.md**（本文） | 维护者 | 包结构、链路、测试、构建、**踩坑**、ADR | 面向玩家的玩法介绍 |
+| [CHANGELOG.md](CHANGELOG.md) | 所有人 | 每版的 Added/Changed/Fixed + **升级注意** | 设计意图、实现细节 |
 | [plan.md](plan.md) | 设计者 | 原始规格与需求 | 实现现状（会过时） |
 | [ACCEPTANCE.md](ACCEPTANCE.md) | 验收者 | 实机证据、裁决结论 | 设计意图 |
+
+> **发版时别忘了 CHANGELOG**：`CHANGELOG.md` 是唯一记录「这版玩家会感觉到什么变化」的地方，
+> 面向玩家的破坏性变更**必须**写进对应版本的「升级注意」，而不是只写在本文的踩坑表里。
 
 **硬性要求**
 
 1. 改了数值口径 → 同步 §3、ADVANCED §6、`SurvivalBudgetRegressionTest`，**三处必须一致**。
 2. 新增踩坑 → 进 §10，写清「现象 / 根因 / 正确做法」，别只写结论。
 3. 新增回归测试 → 注释里写明**钉的是哪个 bug**，否则下一个人会删掉它。
+   **并且做一次反向验证**（把修复改回去确认测试变红）——不做这一步的回归测试有一半是装饰品（见 §10.5 ①）。
 4. 改了 CI 行为 → 同步 §10.2 与本表。
+5. **注释即需求**：凡是注释里写了「零累积 / 不消耗 / 退回原版 / 已清理」这类承诺，
+   必须能在下一行代码里找到对应语句。写不出来的就从注释里删掉，别让它变成谎言（见 §10.5 ③）。
+6. **批量文本替换后要抽查**：全局换数字（测试条数、版本号）极易误伤端口/坐标/版本串，
+   替换后 `grep` 一遍形似端口或坐标的结果（见 §10.5 ⑤）。
 
 > **文档里的相对链接请检查锚点**：GitHub 把标题转锚点时**会去掉点号**，
 > `### 3.2 armor — 盔甲减免` → `#32-armor-盔甲减免`（不是 `#3-2-...`）。改标题后旧链接会失效。
