@@ -5,6 +5,30 @@ Minecraft **Paper 1.21.11** 辐射生存插件：白天露天受持续辐射伤�
 设计与里程碑见 [plan.md](plan.md)；**M1–M4 全部完成**，实机验收证据见 [ACCEPTANCE.md](ACCEPTANCE.md)；
 二次开发（包结构 / 扩展点 / 测试 / 踩坑记录）见 **[DEVELOPMENT.md](DEVELOPMENT.md)**。
 
+## 下载与自动发行
+
+每次推送到 `main`（或手动触发）都会自动构建、跑全量测试并发布 Release：
+
+**[→ 下载最新构建](https://github.com/xgp2012/RadSurvival/releases/latest)**
+
+产物命名：**`RadSurvival-<年>-<月>-<日>-<当天第几次构建>.jar`**
+
+| 示例 | 含义 |
+|---|---|
+| `RadSurvival-2026-10-25-1.jar` | 2026-10-25 当天第 1 次构建 |
+| `RadSurvival-2026-10-25-3.jar` | 2026-10-25 当天第 3 次构建 |
+
+- 日期按 **Asia/Shanghai (UTC+8)** 计算；序号取「当天该分支**已成功完成**的构建数 + 1」，
+  用已完成而非已触发，避免并发排队抢到同一个号。
+- 同名 `plugin.yml` 版本号与文件名一致，游戏内 `/version RadSurvival` 可直接对上。
+- 每次发布附带 `.jar.sha256`，下载后可 `sha256sum -c` 校验完整性。
+- 发布前会跑门禁：全量测试必须通过且**测试数量 ≥ 100**，否则不发布（防配置漂移静默跳过测试）。
+
+**安装**：把 jar 放入服务端 `plugins/` → 重启 → 首次运行生成 `plugins/RadSurvival/config.yml`
+→ `/rad status` 验证装配、`/rad help` 查看命令。
+
+工作流定义见 [`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)。
+
 ## 构建
 
 要求：JDK 21（本项目验证环境为 `D:\java21`，Azul Zulu 21.0.12.1）+ Maven 3.10+。
@@ -13,6 +37,7 @@ Minecraft **Paper 1.21.11** 辐射生存插件：白天露天受持续辐射伤�
 $env:JAVA_HOME='D:\java21'   # 若系统 JAVA_HOME 已指向 21 可跳过
 mvn -e -B clean package                      # 默认：自包含 fat jar（推荐用于生产）
 mvn -e -B clean package -Plibraries-channel  # 可选：thin jar + plugin.yml libraries: 运行期下载
+mvn -e -B clean package -Drevision=2026-10-25-3   # 让 plugin.yml 版本号带上构建号（CI 用此法）
 ```
 
 产物：`target/RadSurvival.jar`（默认约 1.8 MB fat jar；Caffeine/Configurate/Geantyref/Kyori-Option
