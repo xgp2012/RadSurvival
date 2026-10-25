@@ -1,0 +1,164 @@
+name: Build & Release
+
+# 触发：
+#   - push 到 main / master → 构建 + 发布
+#   - 手动（workflow_dispatch）→ 构建 + 发布
+#   - 提 PR 只跑构建与测试，不发布（避免污染 Release 列表）
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 同一分支的新提交会取代排队中的旧运行；但**不取消正在跑的**，
+# 因为构建序号（当天第几次）依赖 run 的完成顺序统计，中途取消会让序号出现空洞。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write          # 创建 Release、上传资产
+  actions: read            # 统计“今天第几次构建”需要读 workflow run 列表
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.naming.outputs.artifact_name }}
+      build_date: ${{ steps.naming.outputs.build_date }}
+      build_no: ${{ steps.naming.outputs.build_no }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # ------------------------------------------------------------------
+      # 产物命名：RadSurvival-<yyyy>-<MM>-<dd>-<当天第几次构建>.jar
+      # 例：RadSurvival-2026-10-25-3.jar
+      #
+      # “第几次”的口径 = 该分支上**当天已成功完成**的构建数 + 1。
+      # 用“已完成”而非“已触发”，避免并发排队时两个 run 抢到同一个序号。
+      # 日期按 Asia/Shanghai（UTC+8，无夏令时）计算。
+      # 注意：这里**不做 UTC/本地时间换算**，而是把 run 的 created_at 直接
+      # 用 jq 的 strftime 换算到 +08:00 再比较日期字符串，避免依赖不同实现的 date(1)。
+      # ------------------------------------------------------------------
+      - name: Compute build number
+        id: naming
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE=$(TZ=Asia/Shanghai date +%F)
+          YEAR=$(TZ=Asia/Shanghai date +%Y)
+          MONTH=$(TZ=Asia/Shanghai date +%m)
+          DAY=$(TZ=Asia/Shanghai date +%d)
+
+          # 统计该分支上“今天（+08:00）已成功完成”的构建数
+          DONE=$(gh api --paginate \
+                   "repos/${GITHUB_REPOSITORY}/actions/workflows/build-release.yml/runs?branch=${GITHUB_REF_NAME}&status=completed&per_page=100" \
+                   --jq "[.workflow_runs[]
+                          | select(.conclusion == \"success\")
+                          | select((.created_at | fromdateiso8601 | . + 28800 | strftime(\"%Y-%m-%d\")) == \"${BUILD_DATE}\")
+                         ] | length" 2>/dev/null || true)
+          DONE=${DONE:-0}
+          BUILD_NO=$((DONE + 1))
+
+          NAME="RadSurvival-${YEAR}-${MONTH}-${DAY}-${BUILD_NO}"
+          {
+            echo "build_date=${BUILD_DATE}"
+            echo "build_no=${BUILD_NO}"
+            echo "artifact_name=${NAME}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice title=Build name::${NAME}.jar（今日第 ${BUILD_NO} 次）"
+
+      - name: Build & run all tests
+        run: |
+          set -euo pipefail
+          # 把构建号写进 plugin.yml 的 version，使 /version 与下载文件名一致
+          REV="${{ steps.naming.outputs.build_date }}-${{ steps.naming.outputs.build_no }}"
+          echo "building with revision=${REV}"
+          mvn -B -ntp clean package -Drevision="${REV}"
+          echo "--- test summary ---"
+          grep -h "Tests run" target/surefire-reports/*.txt 2>/dev/null | tail -n 40 || true
+
+      - name: Verify tests actually ran
+        # 防呆：Maven 若因配置漂移跳过测试，此处必须炸掉，不能悄无声息发布坏包
+        run: |
+          set -euo pipefail
+          total=$(grep -h "Tests run" target/surefire-reports/*.txt 2>/dev/null \
+                  | sed -E 's/.*Tests run: ([0-9]+).*/\1/' | paste -sd+ - | bc || echo 0)
+          echo "total tests run: ${total}"
+          if [ "${total:-0}" -lt 100 ]; then
+            echo "::error::测试数量异常（${total}），拒绝发布"
+            exit 1
+          fi
+
+      - name: Rename artifact
+        id: rename
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.naming.outputs.artifact_name }}"
+          mkdir -p out
+          cp target/RadSurvival.jar "out/${NAME}.jar"
+          # 记录 SHA-256 便于使用者校验下载完整性
+          (cd out && sha256sum "${NAME}.jar" > "${NAME}.jar.sha256")
+          ls -l out
+          echo "jar=out/${NAME}.jar" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.naming.outputs.artifact_name }}
+          path: out/*
+          retention-days: 30
+          if-no-files-found: error
+
+      # ------------------------------------------------------------------
+      # 发布：仅 push 到主干或手动触发时创建 Release（PR 不发布）
+      # ------------------------------------------------------------------
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.naming.outputs.artifact_name }}"
+          DATE="${{ steps.naming.outputs.build_date }}"
+          NO="${{ steps.naming.outputs.build_no }}"
+          TAG="${NAME}"
+          BODY=$(cat <<EOF
+          **RadSurvival** 自动构建 · ${DATE}（Asia/Shanghai）第 ${NO} 次
+
+          | 项 | 值 |
+          |---|---|
+          | 提交 | \`${GITHUB_SHA:0:7}\` |
+          | 分支 | \`${GITHUB_REF_NAME}\` |
+          | 测试 | 全绿（见运行日志） |
+          | 平台 | Paper 1.21.11 · Java 21 |
+
+          ### 安装
+          1. 下载 \`${NAME}.jar\`
+          2. 放入服务端 \`plugins/\` 目录
+          3. 重启服务器（首次会生成 \`plugins/RadSurvival/config.yml\`）
+          4. \`/rad status\` 验证装配，\`/rad help\` 查看命令
+
+          ### 校验下载完整性
+          \`\`\`
+          sha256sum -c ${NAME}.jar.sha256
+          \`\`\`
+          EOF
+          )
+          gh release create "$TAG" \
+            "out/${NAME}.jar#${NAME}.jar" \
+            "out/${NAME}.jar.sha256#${NAME}.jar.sha256" \
+            --title "${NAME}" \
+            --notes "$BODY" \
+            --target "${GITHUB_SHA}"

@@ -1,0 +1,90 @@
+# =====================================================================
+# RadSurvival 配置（plan.md §3 草案全量落地）
+# 非法值启动即报错并拒绝服务；/rad reload 非法时保留旧配置。
+# =====================================================================
+
+# 世界白名单（与 dimensions 取交集，均满足才结算）；校验：不可为空
+enabled-worlds: [world]
+
+# 生效维度（仅主世界有太阳；下界 NETHER / 末地 THE_END 默认豁免，豁免时腐蚀只降不升）
+# 合法值：NORMAL / NETHER / THE_END
+dimensions: NORMAL
+
+# 伤害结算间隔（tick）。校验下限 20：原版玩家受击后有 20 tick 无敌帧，
+# 窗口内 damage() 会被静默吞掉，低于 20 会导致“腐蚀在涨但血不掉”（§1.3）
+tick-interval: 20
+
+# 白天露天基准伤害（半心/s；MC 生命上限仅 20 点，基准过高会秒杀，生存预算见 §1.6）
+base-damage: 1.0
+
+# 参与伤害结算的游戏模式；创造/旁观无条件免疫，冒险可按需开关
+# 合法值：SURVIVAL / ADVENTURE / CREATIVE / SPECTATOR
+damage-game-modes: [SURVIVAL, ADVENTURE]
+
+# true = 仅“站在地面上”（isOnGround）才结算（需求字面口径）；默认 false = 露天即算
+require-on-ground: false
+
+# 夜晚伤害系数（同一露天判定在夜晚成立时 伤害 ×0.5）；校验 ∈ [0,1]
+night-multiplier: 0.5
+
+# 黎明/黄昏是否按线性插值缩放 timeFactor（false = 硬切换，避免瞬间跳变，§1.2）
+smooth-transition: true
+
+# 玻璃等透明方块是否算作遮蔽（true = 玻璃顶也算室内安全，§6 误判对策）
+transparent-blocks-count-as-cover: true
+
+# 露天扫描异步化（§2 线程模型的异步化预留项，本轮落地）：true（默认）= 段缓存 60s 过期后的
+# 补扫交给 Bukkit 异步池，当轮沿用上一已知判定（≤1 结算周期的新鲜度滞后），主线程零方块扫描；
+# 冷启动首扫仍在主线程同步执行 → 首轮判定精确度不变。伤害/事件/HUD/PDC 一律主线程。
+# 玩法与公式完全不受影响；想杜绝 1s 滞后可设 false 回退全同步旧口径。
+async-exposure-scan: true
+
+# 盔甲减免模型：减免 = Σ(部位权重 × 材质系数)，空槽计 0（§1.4）
+armor:
+  # 部位权重，校验各值 ∈ [0,1]；默认头盔0.20/胸甲0.40/护腿0.30/靴子0.10
+  slot-weights: {helmet: 0.20, chestplate: 0.40, leggings: 0.30, boots: 0.10}
+  # 材质系数，键必须属于 {LEATHER,GOLD,CHAINMAIL,IRON,DIAMOND,NETHERITE}，值 ∈ [0,1]
+  # 全套下界合金 = 1.00 恰好 100% 免疫
+  material-factors: {LEATHER: 0.25, GOLD: 0.45, CHAINMAIL: 0.45, IRON: 0.70, DIAMOND: 0.85, NETHERITE: 1.00}
+
+# 腐蚀条系统：露天随时间累积腐蚀度（0~100%），腐蚀越高辐射伤害越高（§1.6）
+corrosion:
+  # 是否启用腐蚀条（关闭则伤害不随暴露时长放大）
+  enabled: true
+  # 白天露天累积速率 %/s（夜晚自动 × night-multiplier）
+  day-accum-per-sec: 1.0
+  # 遮蔽/豁免维度时恢复速率 %/s（仅在线生效，离线冻结）
+  regen-per-sec: 1.0
+  # 盔甲减免是否同时作用于累积速率（true = 全套下界合金既不累积也不掉血）
+  armor-affects-accum: true
+  # 腐蚀 100% 时的伤害倍率上限；校验 ≥ 1（0% ≈ ×1.0，100% ≈ ×maxMultiplier）
+  max-multiplier: 2.0
+  # 放大曲线：linear | sqrt | exp（非线性预留：先缓后爆 / 先高后猛手感）
+  curve: linear
+  # 死亡清零；与 decay-on-death 互斥（二选一）
+  reset-on-death: true
+  # 死亡按比例保留（如 0.5 = 减半不清零）；校验 ∈ (0,1)，仅当 reset-on-death: false 时可设
+  # decay-on-death: 0.5
+  # 播报阶段阈值（%）：穿越 warn/danger 时 title+音效提示（M3 接线）
+  stages: {warn: 50, danger: 75}
+
+# 反馈表现（默认开启，可关；M3 实现 HUD 双条/阶段播报/粒子/音效/死亡文案）
+feedback:
+  # Action bar 双条（辐射等级条 + 腐蚀条），独立 1s 周期任务（与结算任务解耦）
+  actionbar: true
+  # 受击时轻微粒子（1.21.11 无 WIHN 枚举时自动降级为最接近的烟雾类，见实现注释）
+  particles: true
+  # 受击低功耗音效；阶段跳变播报（warn/danger title+音效、回档减轻提示）同随本开关
+  sound: true
+  # 玩家死于辐射结算（掉血归因 + 结算时间窗双保险，不误伤其他死因）时替换废土风死亡文案
+  death-message: true
+  # true = 腐蚀条改用 BossBar 常驻显示（屏幕顶部），actionbar 仅显示辐射等级条
+  bossbar-corrosion: false
+  # ProtocolLib 增强：auto | true | false —— 仅做「抑制原版受伤红闪」一件低风险事，
+  # 检测不到 / 异常时自动留桩降级；包级 HUD 全量替换为 §4 扩展（本期不做）
+  protocol-lib: auto
+
+# 命令相关
+commands:
+  # /rad reload 所需权限节点（console 与持有该节点的玩家可执行）
+  reload-permission: radsurvival.reload

@@ -1,0 +1,40 @@
+# RadSurvival —— 辐射生存 Paper 插件（plan.md §2 资源）
+# 【libraries 通道变体】仅在 `mvn clean package -Plibraries-channel` 下覆盖主 plugin.yml 使用：
+#   shade 跳过（thin jar），依赖由 Paper 启动时从 libraries: 声明的坐标下载。
+#   适用于能直连 Paper Maven Central 镜像的服务器；本环境该镜像不可达（见 pom.xml 注释）。
+name: RadSurvival
+version: ${project.version}
+main: com.ft.radsurvival.RadSurvivalPlugin
+api-version: '1.21'
+
+# 纯 Java 库走 Paper libraries 运行时下载（plan.md §5.1，不打 fat jar）
+libraries:
+  - com.github.ben-manes.caffeine:caffeine:3.1.8
+  - org.spongepowered:configurate-yaml:4.2.0
+
+# 插件型软依赖：缺失时核心玩法不受影响（plan.md §5.2）
+softdepend:
+  - ProtocolLib
+  - PlaceholderAPI
+  - NBTAPI
+  - Vault
+
+commands:
+  rad:
+    description: RadSurvival 管理命令（重载配置 / 查看判定状态 / 强制结算 / 腐蚀条管理）
+    usage: /rad <reload|status|force-check|corrosion> [args]
+    permission-message: 你没有权限执行 /rad 命令。
+
+permissions:
+  radsurvival.use:
+    description: 使用 /rad 基础功能（受辐射规则约束的玩家默认持有）
+    default: true
+  radsurvival.exempt:
+    description: 豁免辐射结算（不受日晒辐射伤害，也不累积腐蚀）
+    default: false
+  radsurvival.admin:
+    description: 管理功能：/rad corrosion get|set|add 等
+    default: op
+  radsurvival.reload:
+    description: 允许执行 /rad reload 重载配置
+    default: op

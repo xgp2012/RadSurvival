@@ -1,0 +1,22 @@
+# 统一换行符：仓库内一律 LF，避免在 Windows 上 clone 后把 shell 脚本/工作流转成 CRLF。
+# GitHub Actions 的 run: 块在 CRLF 下会报 “unexpected character '\r'”，必须钉死。
+* text=auto eol=lf
+
+# 明确指定类型
+*.java   text eol=lf
+*.xml    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.sh     text eol=lf
+*.cjs    text eol=lf
+*.json   text eol=lf
+
+# Windows 脚本保持 CRLF（PowerShell 5.1 对 LF 也能跑，但保持一致更稳）
+*.ps1    text eol=crlf
+
+# 二进制：不参与换行符转换
+*.jar    binary
+*.png    binary
+*.dat    binary
+*.gz     binary

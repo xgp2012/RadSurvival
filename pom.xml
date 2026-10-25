@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.ft</groupId>
+  <artifactId>radsurvival</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>RadSurvival</name>
+  <description>Minecraft Paper 1.21.11 辐射生存插件（日晒辐射 / 腐蚀条 / 盔甲减免）</description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <maven.compiler.release>21</maven.compiler.release>
+    <!-- 默认构建产出自包含 fat jar（plan.md §6 预案落地）：
+         实测 Paper 的 libraries: 运行期下载走 maven-central.storage-download.googleapis.com，
+         本环境连接被重置 → Error resolving libraries → 插件直接加载失败。
+         故默认 shade + relocate（class 冲突风险由重定位消除），
+         `-Plibraries-channel` 可切回 plan.md §5.1 的 libraries 通道（构建产物为 thin jar）。 -->
+    <shade.skip>false</shade.skip>
+  </properties>
+
+  <!-- Paper API 仓库（plan.md §5.1）+ 插件型 API 仓库（§5.2，可达性实测 2026-10-18：
+       extendedclip→PAPI 2.12.3 pom/jar 均可拉（极慢，~5KB/s，jar 已验证完整并缓存本地 .m2）；
+       dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉，jar 路径在本环境超时挂死——
+       本地 .m2 已用官方 GitHub Release 同版本产物 install-file 补装（plugin.yml 核验 5.3.0），
+       坐标与仓库配置保持官方不变；他人环境构建时若 dmulloy2 正常则直接在线解析 -->
+  <repositories>
+    <repository>
+      <id>papermc</id>
+      <url>https://repo.papermc.io/repository/maven-public/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>true</enabled></snapshots>
+    </repository>
+    <repository>
+      <id>dmulloy2-repo</id>
+      <url>https://repo.dmulloy2.net/repository/public/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+    <repository>
+      <id>placeholderapi</id>
+      <url>https://repo.extendedclip.com/content/repositories/placeholderapi/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <!-- Paper API：编译期使用，运行期由服务器提供 -->
+    <dependency>
+      <groupId>io.papermc.paper</groupId>
+      <artifactId>paper-api</artifactId>
+      <version>1.21.11-R0.1-SNAPSHOT</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- 纯 Java 库：默认 compile scope → 打进 relocate 后的自包含 fat jar（见 properties 注释）；
+         `-Plibraries-channel` 时代码不变，just 构建 thin jar + plugin.yml libraries: 运行期下载（plan.md §5.1）。
+         caffeine/configurate 的其余传递依赖（geantyref、kyori-option、内嵌 snakeyaml）随 compile scope 一并入包。 -->
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+      <version>3.1.8</version>
+    </dependency>
+    <dependency>
+      <groupId>org.spongepowered</groupId>
+      <artifactId>configurate-yaml</artifactId>
+      <version>4.2.0</version>
+    </dependency>
+
+    <!-- 插件型 API：provided（= Gradle 语境的 compileOnly：编译期可见、不打入 jar）+ softdepend，
+         缺失走原生降级（plan.md §5.1/§5.2，M3 接线）。
+         ProtocolLib 仅用于红闪抑制（feedback/ProtocolLibHurtFlashEnhancer，运行时 try/catch 留桩）；
+         PlaceholderAPI 仅用于 %radsurvival_*% 占位符（placeholder/ 包，Bridge 检测缺失则不加载）。 -->
+    <dependency>
+      <groupId>com.comphenix.protocol</groupId>
+      <artifactId>ProtocolLib</artifactId>
+      <version>5.3.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>me.clip</groupId>
+      <artifactId>placeholderapi</artifactId>
+      <version>2.12.3</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- 测试（M2b 接线：MockBukkit 主循环/监听器/命令冒烟，plan.md §5.2） -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <version>3.26.3</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- MockBukkit（§5.2）：首选 com.github.seeseemelk:MockBukkit-v1.21:3.133.2 实测在
+         paper-api 1.21.11 下崩溃（mock() 初始化内部方块/材质标签表引用 1.21.1 已移除的
+         minecraft:chain 等条目 → InternalTagMisconfigurationException），
+         按其后继坐标（同项目 4.x 迁移产物，2026-08 发布、跟踪 1.21.x 现行 API）替换。
+         排除其 junit-jupiter-api 6.x 传递依赖：测试运行时统一钉在本工程 JUnit 5.11.4。 -->
+    <dependency>
+      <groupId>org.mockbukkit.mockbukkit</groupId>
+      <artifactId>mockbukkit-v1.21</artifactId>
+      <version>4.116.3</version>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.junit.jupiter</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- 产物固定名：maven-jar-plugin 消费 build.finalName（其插件级 finalName 参数为只读） -->
+    <finalName>RadSurvival</finalName>
+    <resources>
+      <!-- plugin.yml 开启 filtering（替换 ${project.version}） -->
+      <resource>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>plugin.yml</include>
+        </includes>
+        <filtering>true</filtering>
+      </resource>
+      <!-- config.yml 及其余资源不过滤（保留 UTF-8 原文与注释） -->
+      <resource>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>plugin.yml</exclude>
+        </excludes>
+        <filtering>false</filtering>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <release>21</release>
+          <encoding>UTF-8</encoding>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <!-- 固定产物名 RadSurvival.jar 由 <build><finalName> 提供（finalName 参数只读，不可在插件级配置） -->
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+
+      <!-- plan.md §6「libraries 启动下载受仓库限制」对策：shade + relocate 一键切换。
+           重定位前缀 com.ft.radsurvival.lib.*，避免与其他插件携带的同名库冲突；
+           configurate-yaml 已内嵌并重定位 SnakeYAML，无需额外内嵌 org.yaml。
+           默认主产物即 shaded jar；-Dshade.skip=true（或 -Plibraries-channel）跳过。 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <skip>${shade.skip}</skip>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <artifactSet>
+                <includes>
+                  <include>com.github.ben-manes.caffeine:caffeine</include>
+                  <include>org.spongepowered:configurate-yaml</include>
+                  <include>org.spongepowered:configurate-core</include>
+                  <include>io.leangen.geantyref:geantyref</include>
+                  <include>net.kyori:option</include>
+                </includes>
+              </artifactSet>
+              <relocations>
+                <relocation>
+                  <pattern>com.github.benmanes.caffeine</pattern>
+                  <shadedPattern>com.ft.radsurvival.lib.caffeine</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.spongepowered.configurate</pattern>
+                  <shadedPattern>com.ft.radsurvival.lib.configurate</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>io.leangen.geantyref</pattern>
+                  <shadedPattern>com.ft.radsurvival.lib.geantyref</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>net.kyori.option</pattern>
+                  <shadedPattern>com.ft.radsurvival.lib.kyori.option</shadedPattern>
+                </relocation>
+              </relocations>
+              <transformers>
+                <!-- configurate-yaml 通过 META-INF/services 注册 ConfigurationFormat，必须合并并随重定位改写 -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/*/module-info.class</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- CI 发布用：把 plugin.yml 里的 ${project.version} 覆盖成与发布文件名一致的构建号
+         （例：RadSurvival-2026-10-25-3.jar → plugin.yml version: 2026-10-25-3）。
+         本地不激活，README 里 `mvn -B clean package` 的结果与既往一致。
+         用法：mvn -B clean package -Drevision=2026-10-25-3 -->
+    <profile>
+      <id>ci-version</id>
+      <activation>
+        <property>
+          <name>revision</name>
+        </property>
+      </activation>
+      <properties>
+        <!-- plugin.yml 过滤时读取；不设置 revision 时回落到工程版本号 -->
+        <project.version>${revision}</project.version>
+      </properties>
+    </profile>
+
+    <!-- plan.md §5.1 原通道：thin jar + plugin.yml `libraries:` 由 Paper 运行期下载。
+         用于服务器能直连 Paper 的 Maven Central 镜像的部署环境。
+         构建：mvn clean package -Plibraries-channel -->
+    <profile>
+      <id>libraries-channel</id>
+      <properties>
+        <shade.skip>true</shade.skip>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-resources-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>libraries-channel-plugin-yml</id>
+                <phase>process-classes</phase>
+                <goals>
+                  <goal>copy-resources</goal>
+                </goals>
+                <configuration>
+                  <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                  <overwrite>true</overwrite>
+                  <resources>
+                    <resource>
+                      <directory>src/libraries-channel-resources</directory>
+                      <includes>
+                        <include>plugin.yml</include>
+                      </includes>
+                      <filtering>true</filtering>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>
