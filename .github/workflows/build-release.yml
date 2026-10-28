@@ -3,7 +3,7 @@ name: Build & Release
 # 触发：
 #   - push 到 main / master → 构建 + 发布
 #   - 手动（workflow_dispatch）→ 构建 + 发布
-#   - 提 PR 只跑构建与测试，不发布（避免污染 Release 列表）
+#   - 提 PR 只跑构建与测试 + 产物自检，不发布（避免污染 Release 列表）
 on:
   push:
     branches: [main, master]
@@ -11,24 +11,40 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-# 同一分支的新提交会取代排队中的旧运行；但**不取消正在跑的**，
-# 因为构建序号（当天第几次）依赖 run 的完成顺序统计，中途取消会让序号出现空洞。
+# 手动触发时在 Actions 列表直接显示分支与触发人，不用点进去猜是哪次构建。
+run-name: "Release · ${{ github.ref_name }} · ${{ github.actor }}"
+
+# 同一分支的新提交会排队而非并行；**不取消正在跑的**——
+# 构建序号（当天第几次）依赖 run 的完成顺序统计，中途取消会让序号出现空洞。
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write          # 创建 Release、上传资产
-  actions: read            # 统计“今天第几次构建”需要读 workflow run 列表
+  actions: read            # 统计"今天第几次构建"需要读 workflow run 列表
+
+env:
+  # 发布门禁：测试总数下限。当前实测 268 条；下限取 200 —— 既能兜住依赖升级带来的小幅波动，
+  # 又能在 Surefire 静默跳过/部分测试类消失时炸掉发布（原下限 100 对"丢了一半测试"不设防）。
+  MIN_TESTS: 200
+  # fat jar 内 relocated 依赖条目下限：v1.2 实测 1259（见 ACCEPTANCE §J.1 / DEVELOPMENT §9）。
+  # 留 ~5% 余量，防 Caffeine/Configurate 小版本升级导致条目数微降而误杀。
+  LIB_ENTRY_FLOOR: 1200
 
 jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 25    # 防网络挂起把并发队列堵死（本仓库踩过仓库端 socket 挂起的坑）
+    defaults:
+      run:
+        shell: bash
     outputs:
       artifact_name: ${{ steps.naming.outputs.artifact_name }}
       build_date: ${{ steps.naming.outputs.build_date }}
       build_no: ${{ steps.naming.outputs.build_no }}
+      test_total: ${{ steps.testgate.outputs.total }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,11 +60,13 @@ jobs:
       # 产物命名：RadSurvival-<yyyy>-<MM>-<dd>-<当天第几次构建>.jar
       # 例：RadSurvival-2026-10-25-3.jar
       #
-      # “第几次”的口径 = 该分支上**当天已成功完成**的构建数 + 1。
-      # 用“已完成”而非“已触发”，避免并发排队时两个 run 抢到同一个序号。
-      # 日期按 Asia/Shanghai（UTC+8，无夏令时）计算。
-      # 注意：这里**不做 UTC/本地时间换算**，而是把 run 的 created_at 直接
-      # 用 jq 的 strftime 换算到 +08:00 再比较日期字符串，避免依赖不同实现的 date(1)。
+      # "第几次"的口径 = 该分支上**当天已成功完成**的构建数 + 1。
+      # 用"已完成"而非"已触发"，避免并发排队时两个 run 抢到同一个序号。
+      # 日期按 Asia/Shanghai（UTC+8，无夏令时）计算；created_at 用 jq 的
+      # fromdateiso8601 | +28800 | strftime 换算，不依赖 date(1) 的实现差异。
+      #
+      # 统计失败（API 抖动等）时回退 0 并**显式告警**：最坏结果是序号重复，
+      # 发布步骤已幂等（同名 Release 存在时原位更新产物），不会产生第二个发布。
       # ------------------------------------------------------------------
       - name: Compute build number
         id: naming
@@ -61,14 +79,18 @@ jobs:
           MONTH=$(TZ=Asia/Shanghai date +%m)
           DAY=$(TZ=Asia/Shanghai date +%d)
 
-          # 统计该分支上“今天（+08:00）已成功完成”的构建数
-          DONE=$(gh api --paginate \
+          DONE_RAW=$(gh api --paginate \
                    "repos/${GITHUB_REPOSITORY}/actions/workflows/build-release.yml/runs?branch=${GITHUB_REF_NAME}&status=completed&per_page=100" \
                    --jq "[.workflow_runs[]
                           | select(.conclusion == \"success\")
                           | select((.created_at | fromdateiso8601 | . + 28800 | strftime(\"%Y-%m-%d\")) == \"${BUILD_DATE}\")
-                         ] | length" 2>/dev/null || true)
-          DONE=${DONE:-0}
+                         ] | length" 2>&1) || true
+          if [[ "${DONE_RAW}" =~ ^[0-9]+$ ]]; then
+            DONE="${DONE_RAW}"
+          else
+            echo "::warning title=序号统计失败::gh api 未能返回计数（原始输出：${DONE_RAW:-<空>}），本次按当天第 1 次命名；若重名，发布步骤会原位更新既有 Release，不会产生第二个发布。"
+            DONE=0
+          fi
           BUILD_NO=$((DONE + 1))
 
           NAME="RadSurvival-${YEAR}-${MONTH}-${DAY}-${BUILD_NO}"
@@ -76,73 +98,144 @@ jobs:
             echo "build_date=${BUILD_DATE}"
             echo "build_no=${BUILD_NO}"
             echo "artifact_name=${NAME}"
+            echo "revision=${BUILD_DATE}-${BUILD_NO}"
           } >> "$GITHUB_OUTPUT"
           echo "::notice title=Build name::${NAME}.jar（今日第 ${BUILD_NO} 次）"
 
       - name: Build & run all tests
+        env:
+          REV: ${{ steps.naming.outputs.revision }}
         run: |
           set -euo pipefail
-          # 把构建号写进 plugin.yml 的 version，使 /version 与下载文件名一致
-          REV="${{ steps.naming.outputs.build_date }}-${{ steps.naming.outputs.build_no }}"
+          # 把构建号写进 plugin.yml 的 version，使游戏内 /version 与下载文件名一致
+          # （pom 的 ci-version profile：-Drevision 激活并覆盖 project.version）
           echo "building with revision=${REV}"
           mvn -B -ntp clean package -Drevision="${REV}"
-          echo "--- test summary ---"
-          grep -h "Tests run" target/surefire-reports/*.txt 2>/dev/null | tail -n 40 || true
 
+      # ------------------------------------------------------------------
+      # 发布门禁（原"≥100 条"防呆的加强版）：
+      #   - 总数用 awk 直接从 surefire 汇总行求和（不依赖 bc）；
+      #   - Failures / Errors / Skipped 必须全 0 —— "全绿且无跳过"是文档口径，
+      #     静默跳过正是本门禁要抓的场景，不能只数总数放行；
+      #   - 总数 < MIN_TESTS 拒绝（防配置漂移导致测试类整批消失）。
+      # 汇总数写进 output，供发布说明引用（此前"全绿"只是指向日志的文字，无实数）。
+      # ------------------------------------------------------------------
       - name: Verify tests actually ran
-        # 防呆：Maven 若因配置漂移跳过测试，此处必须炸掉，不能悄无声息发布坏包
+        id: testgate
+        env:
+          MIN_TESTS: ${{ env.MIN_TESTS }}
         run: |
           set -euo pipefail
-          total=$(grep -h "Tests run" target/surefire-reports/*.txt 2>/dev/null \
-                  | sed -E 's/.*Tests run: ([0-9]+).*/\1/' | paste -sd+ - | bc || echo 0)
-          echo "total tests run: ${total}"
-          if [ "${total:-0}" -lt 100 ]; then
-            echo "::error::测试数量异常（${total}），拒绝发布"
+          read -r total failures errors skipped <<< "$(awk -F'[,:]' '
+            /^Tests run:/ { gsub(/ /, ""); t += $2; f += $4; e += $6; s += $8 }
+            END { printf "%d %d %d %d", t, f, e, s }' target/surefire-reports/*.txt)"
+          echo "tests: total=${total} failures=${failures} errors=${errors} skipped=${skipped}"
+          if [ "${failures}" -ne 0 ] || [ "${errors}" -ne 0 ]; then
+            echo "::error::存在失败用例（failures=${failures}, errors=${errors}），拒绝发布"
             exit 1
           fi
+          if [ "${skipped}" -ne 0 ]; then
+            echo "::error::存在被跳过的用例（skipped=${skipped}），与「全绿无跳过」口径不符，拒绝发布"
+            exit 1
+          fi
+          if [ "${total}" -lt "${MIN_TESTS}" ]; then
+            echo "::error::测试数量异常（${total} < 下限 ${MIN_TESTS}），疑似 Surefire 静默跳过，拒绝发布"
+            exit 1
+          fi
+          echo "total=${total}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Test gate::${total} 条全绿（≥${MIN_TESTS}，无跳过）"
+
+      # ------------------------------------------------------------------
+      # fat jar 自检 = DEVELOPMENT §9 发布检查单第 2~4 项的自动化（此前靠人肉）：
+      #   a) 内嵌 relocated 条目数 ≥ LIB_ENTRY_FLOOR；
+      #   b) org/spongepowered/*、com/github/benmanes/* 原始路径**零泄漏**；
+      #   c) plugin.yml 无 libraries:（fat jar 通道口径，防 thin 通道混入发布）；
+      #   d) plugin.yml 的 version == 本次构建号（游戏内 /version 与文件名对得上）；
+      #   e) jar 内 config.yml 与仓库源文件逐字节一致（ACCEPTANCE §B.3 口径）。
+      # PR 同样执行——评审时就该看到这些问题，而不是合并后发布失败。
+      # ------------------------------------------------------------------
+      - name: Verify fat jar self-containment
+        env:
+          REV: ${{ steps.naming.outputs.revision }}
+          LIB_ENTRY_FLOOR: ${{ env.LIB_ENTRY_FLOOR }}
+        run: |
+          set -euo pipefail
+          JAR=target/RadSurvival.jar
+          test -f "$JAR"
+
+          listing=$(unzip -l "$JAR")
+          lib_entries=$(printf '%s\n' "$listing" | grep -c 'com/ft/radsurvival/lib/' || true)
+          echo "relocated entries: ${lib_entries}（下限 ${LIB_ENTRY_FLOOR}）"
+          [ "${lib_entries}" -ge "${LIB_ENTRY_FLOOR}" ] \
+            || { echo "::error::内嵌库条目异常（${lib_entries} < ${LIB_ENTRY_FLOOR}），疑似 relocation 失效"; exit 1; }
+
+          leaks=$(printf '%s\n' "$listing" | grep -cE ' (org/spongepowered|com/github/benmanes)/' || true)
+          [ "${leaks}" -eq 0 ] \
+            || { echo "::error::发现未重定位的原始包路径泄漏（${leaks} 条）"; exit 1; }
+
+          plugin_yml=$(unzip -p "$JAR" plugin.yml)
+          if printf '%s\n' "$plugin_yml" | grep -q '^libraries:'; then
+            echo "::error::plugin.yml 含 libraries:（thin 通道混入 fat 发布）——检查是否误用 -Plibraries-channel"
+            exit 1
+          fi
+          printf '%s\n' "$plugin_yml" | grep -q "^version: ${REV}$" \
+            || { echo "::error::plugin.yml version 与构建号 ${REV} 不一致：$(printf '%s\n' "$plugin_yml" | grep '^version:' || echo '<缺失>')"; exit 1; }
+
+          unzip -p "$JAR" config.yml > /tmp/embedded-config.yml
+          cmp -s /tmp/embedded-config.yml src/main/resources/config.yml \
+            || { echo "::error::jar 内 config.yml 与 src/main/resources/config.yml 不一致（§9 检查单第 3 项）"; exit 1; }
+          echo "::notice title=Self-check::fat jar 自包含/无泄漏/版本号/内嵌配置 五项检查通过"
 
       - name: Rename artifact
         id: rename
+        env:
+          NAME: ${{ steps.naming.outputs.artifact_name }}
         run: |
           set -euo pipefail
-          NAME="${{ steps.naming.outputs.artifact_name }}"
           mkdir -p out
           cp target/RadSurvival.jar "out/${NAME}.jar"
           # 记录 SHA-256 便于使用者校验下载完整性
           (cd out && sha256sum "${NAME}.jar" > "${NAME}.jar.sha256")
           ls -l out
-          echo "jar=out/${NAME}.jar" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.naming.outputs.artifact_name }}
           path: out/*
-          retention-days: 30
+          # PR 的产物只做评审用，7 天足够；主干/手动发布保留 30 天
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
           if-no-files-found: error
 
       # ------------------------------------------------------------------
-      # 发布：仅 push 到主干或手动触发时创建 Release（PR 不发布）
+      # 发布：仅 push 到主干或手动触发时创建 Release（PR 不发布）。
+      # **幂等**：同名 tag 已存在（同日重跑/序号统计回退所致）时不报错——
+      # 原位更新说明并用 --clobber 覆盖资产，保证"重跑一次 = 最新产物"。
+      # notes 走 --notes-file：heredoc 内容与脚本同缩进（YAML 块剥离后顶格），
+      # 否则 markdown 缩进 4 空格会变代码块、表格不渲染（旧版的潜在 bug）。
       # ------------------------------------------------------------------
       - name: Publish GitHub Release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.naming.outputs.artifact_name }}
+          DATE: ${{ steps.naming.outputs.build_date }}
+          NO: ${{ steps.naming.outputs.build_no }}
+          TOTAL: ${{ steps.testgate.outputs.total }}
         run: |
           set -euo pipefail
-          NAME="${{ steps.naming.outputs.artifact_name }}"
-          DATE="${{ steps.naming.outputs.build_date }}"
-          NO="${{ steps.naming.outputs.build_no }}"
-          TAG="${NAME}"
-          BODY=$(cat <<EOF
+          SHA7="${GITHUB_SHA:0:7}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          cat > notes.md <<EOF
           **RadSurvival** 自动构建 · ${DATE}（Asia/Shanghai）第 ${NO} 次
 
           | 项 | 值 |
           |---|---|
-          | 提交 | \`${GITHUB_SHA:0:7}\` |
+          | 提交 | [\`${SHA7}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |
           | 分支 | \`${GITHUB_REF_NAME}\` |
-          | 测试 | 全绿（见运行日志） |
+          | 测试 | **${TOTAL} 条全绿**（Failures / Errors / Skipped 均为 0，门禁下限 ${MIN_TESTS}） |
           | 平台 | Paper 1.21.11 · Java 21 |
+          | 构建 | [运行日志](${RUN_URL}) |
 
           ### 安装
           1. 下载 \`${NAME}.jar\`
@@ -155,10 +248,17 @@ jobs:
           sha256sum -c ${NAME}.jar.sha256
           \`\`\`
           EOF
-          )
-          gh release create "$TAG" \
-            "out/${NAME}.jar#${NAME}.jar" \
-            "out/${NAME}.jar.sha256#${NAME}.jar.sha256" \
-            --title "${NAME}" \
-            --notes "$BODY" \
-            --target "${GITHUB_SHA}"
+
+          if gh release view "$NAME" >/dev/null 2>&1; then
+            echo "Release $NAME 已存在（同日重跑）——原位更新说明与产物"
+            gh release edit "$NAME" --title "$NAME" --notes-file notes.md
+            gh release upload "$NAME" "out/${NAME}.jar" "out/${NAME}.jar.sha256" --clobber
+          else
+            gh release create "$NAME" \
+              "out/${NAME}.jar#${NAME}.jar" \
+              "out/${NAME}.jar.sha256#${NAME}.jar.sha256" \
+              --title "$NAME" \
+              --notes-file notes.md \
+              --target "${GITHUB_SHA}"
+          fi
+          echo "::notice title=Release::$(gh release view "$NAME" --json htmlUrl -q .htmlUrl)"
