@@ -308,6 +308,28 @@ class SunExposureCheckerTest {
                 .as("眼位与遮挡同格 = 遮蔽（含眼睛所在格，§1.1）").isFalse();
     }
 
+    @Test
+    @DisplayName("v1.3 回归：缓存条目数按方块列计——同一列任意眼高只占 1 条，不再按 y 段重复占位")
+    void cacheEntriesAreColumnScoped() {
+        AtomicLong clock = new AtomicLong(0L);
+        // 容量放大到 64 条，避免 maximumSize 淘汰干扰「到底占了几条」的观测
+        SunExposureChecker checker = cached(clock, true);
+        // 同一列、5 个跨 3 个 y 段的眼睛高度（段 3/4/5/18）：旧实现会占 4 条（16³ 段粒度），新实现 1 条
+        for (int eyeY : new int[] {63, 64, 79, 80, 300}) {
+            assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, eyeY, 0, MAX_HEIGHT, y -> false))
+                    .isTrue();
+        }
+        assertThat(checker.cachedEntries())
+                .as("v1.3：缓存以方块列为粒度，跨 y 段不新增条目（旧实现 = 每 16³ 段一条）")
+                .isEqualTo(1L);
+        // 相邻列（x 或 z 跨 16 格段）各自一条，互不合并
+        assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 16, 64, 0, MAX_HEIGHT, y -> false)).isTrue();
+        assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, 64, 16, MAX_HEIGHT, y -> false)).isTrue();
+        assertThat(checker.cachedEntries())
+                .as("跨段 x / 跨段 z 各是一条独立列")
+                .isEqualTo(3L);
+    }
+
     // ---------------------------------------------------------------- 异步补扫管线（§2 线程模型）
 
     @Test
