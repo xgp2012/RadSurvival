@@ -45,8 +45,16 @@
   避免并发排队时两个 run 抢到同一个号。
 - `plugin.yml` 的 `version` 与文件名一致（`-Drevision=` 注入），游戏内 `/version RadSurvival` 可直接对上。
 - 每次发布附带 `.jar.sha256`，下载后可 `sha256sum -c` 校验完整性。
-- **发布门禁**：全量测试必须通过且**测试数量 ≥ 100**，否则中止发布——防配置漂移导致
-  Surefire 静默跳过测试、坏包照发。
+- **发布门禁（v1.3 起加强）**，任一不满足即中止、不发坏包：
+  1. 全量测试通过，且**总数 ≥ 200、Failures/Errors/Skipped 全 0**——防配置漂移导致
+     Surefire 静默跳过或测试类整批消失；实测总数会写进 Release 说明，不是一句「全绿」空话；
+  2. **fat jar 自检五项**（自动执行 DEVELOPMENT §9 发布检查单第 2~4 项）：内嵌 relocated 条目
+     ≥ 1200、`org/spongepowered`/`com/github/benmanes` 零泄漏、`plugin.yml` 无 `libraries:`
+     （防 thin 通道混入）、`plugin.yml` 的 `version` == 构建号、jar 内 `config.yml` 与仓库逐字节一致。
+  PR 也全程执行这两关——问题在评审时暴露，而不是合并后发布失败。
+- **同日重跑幂等**：产物名（日期+序号）即 Release tag；重跑时 tag 已存在则**原位更新**说明与
+  产物（`gh release upload --clobber`），不会失败、也不会产生第二个发布。序号统计若因 API
+  抖动失败会告警并回退「当天第 1 次」，由幂等发布兜住。
 
 工作流定义见 [`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)。
 触发：push/PR 到 `main`（PR 只构建不发布）+ `workflow_dispatch` 手动。
@@ -83,7 +91,7 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 > `-Plibraries-channel` 产 thin jar（111 KB），两者 plugin.yml 由构建 profile 自动切换。
 
 > **构建环境提示**：远程仓库偶发 socket 挂起（与代码无关，与 ProtocolLib/PAPI 同源问题）。
-> 依赖已齐时用 `mvn -o -B clean package` 离线构建（265 条测试离线全绿）。
+> 依赖已齐时用 `mvn -o -B clean package` 离线构建（268 条测试离线全绿）。
 
 > **依赖仓库实况（2026-10-18 实测）**：extendedclip→PAPI 2.12.3 pom/jar 可拉（极慢，~5–13KB/s）；
 > dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉但 jar 通道挂死——本地 `.m2` 已用**官方 GitHub Release
@@ -92,10 +100,18 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 
 ### 2.3 测试
 
-当前测试规模：**265 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
+当前测试规模：**268 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
 M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11 +
-**v1.2 抗尘埃药与护甲削弱 43**；
+v1.2 抗尘埃药与护甲削弱 43 + **v1.3 露天判定稳定性 3**；
 `com.ft.radsurvival.mockbukkit` 与 `com.ft.radsurvival.listener` 包），无跳过项。
+
+v1.3 新增（露天判定稳定性，均做过反向验证）：
+
+| 类 · 方法 | 钉住什么 |
+|---|---|
+| `core/SunExposureCheckerTest#verticalMovementDoesNotRescanOrFlip` | 同一方块列内上下移动（跨 16 格段界）不重扫、判定不翻转 |
+| `core/SunExposureCheckerTest#columnScanCoversBelowEyeHeight` | 扫描必须覆盖整列：高眼位写入的顶遮挡不得让低眼位误判遮蔽 |
+| `core/SunExposureCheckerTest#cacheEntriesAreColumnScoped` | 缓存条目按方块列计，同一列任意眼高只占 1 条 |
 
 v1.2 新增的四个测试类：
 
@@ -409,22 +425,37 @@ tick-interval（≥20 全局任务）
 
 主线程稳态**零方块扫描**，玩法与公式零取舍。
 
+- **缓存粒度 = 方块列（v1.3）**：缓存键是「世界 + x/z 的 16 格段」，**不含高度**。一整个方块列
+  只扫一次，值为该列的**顶遮挡高度**；列内任意眼高用同一个值判定（`eyeY > 顶遮挡` 即露天）。
+  旧版键里带高度段，玩家蹲下站起就会换键重扫，且同一列的不同高度段各写一份互不相同的值，
+  导致判定在相邻两轮之间来回切换——这就是「头顶没方块却掉血 / 判定时有时无」的根因。
+- **扫描范围 = 整列**：从世界底部之下起算，不是从眼睛附近起算。这样才能保证「顶遮挡」
+  是整列的真实属性，低处的方块不会漏。
 - **双层缓存**：权威层（TTL 60s，值为顶遮挡高度）+ 粘滞层（无过期、容量封顶）。
-  段过期后的补扫派发给 `ScanDispatcher`（生产 = `BukkitScheduler#runTaskAsynchronously`，
-  段级在途去重，同段多玩家共享一次扫描），当轮以粘滞旧值应答——判定**机制**与结算/伤害/
+  列过期后的补扫派发给 `ScanDispatcher`（生产 = `BukkitScheduler#runTaskAsynchronously`，
+  列级在途去重，同列多玩家共享一次扫描），当轮以粘滞旧值应答——判定**机制**与结算/伤害/
   免疫/恢复分支完全不变，仅缓存新鲜度滞后 ≤1 个结算周期（本就被 60s TTL 支配）。
-- **冷启动零妥协**：玩家进入从未记录过的段时仍主线程同步扫描，首轮判定精确度与同步口径一致。
+- **冷启动零妥协**：玩家进入从未记录过的列时仍主线程同步扫描，首轮判定精确度与同步口径一致。
 - **异常安全**：异步任务只读已加载区块；恰被卸载触发 Paper 异步防护等异常一律内部吞掉
   （不发布、下轮重试），绝不反噬主线程；调度器关闭（禁用中）同样静默。
+- **主线程守护**：判定入口在非主线程被调用时一律按「露天」保守应答（宁多掉血，不误判安全区），
+  由下一轮主线程判定纠正。
 - **开关**：`async-exposure-scan: true`（默认）→ 异步管线；`false` → 全同步旧口径
   （极小地图服或想杜绝 1s 滞后可切）。带校验，reload 后随服务容器自动重建装配。
 - **收益**：每结算轮每玩家的主线程成本 = 2 次缓存查找（原：过期段最多 ~390 次
-  `getBlockAt`+`getBlockData` 对象分配）；HUD 每秒预览同样受益。
+  `getBlockAt`+`getBlockData` 对象分配），且扫描次数与玩家所在高度**完全解耦**
+  （v1.3 前，地面附近上下移动的玩家几乎每轮都在重扫）。
 - **其余必须主线程的操作不变**：`damage()`/事件广播/粒子音效/actionbar/BossBar/PDC 写入
   全部留在主线程；腐蚀数值是纯内存运算无需异步。
 - 测试：`SunExposureCheckerTest#asyncRefillPipelineWithStickyValue`（冷启动同步零派发、
   过期粘滞 + 去重派发 1 个、刷新后精确新值）、`#asyncScanFailureIsContained`（异常吞掉
-  不发布、在途释放、下轮自愈重试）、`PluginConfigValidationTest#asyncExposureScanSwitch`。
+  不发布、在途释放、下轮自愈重试）、`PluginConfigValidationTest#asyncExposureScanSwitch`；
+  v1.3 新增 `#verticalMovementDoesNotRescanOrFlip`、`#columnScanCoversBelowEyeHeight`、
+  `#cacheEntriesAreColumnScoped`。
+
+> **排错提示（v1.3）**：升级后如果仍有「明明天空开阔却掉血」，先确认**真的对着天空**——
+> 树叶、藤蔓、玻璃顶、半砖、地毯、雪层、脚手架等都可能算遮蔽（`transparent-blocks-count-as-cover`
+> 只影响「不挡光但不可通行」的方块）。`/rad status <玩家>` 会直接给出该轮的露天判定与顶遮挡推导。
 
 ---
 
@@ -524,6 +555,9 @@ tick-interval（≥20 全局任务）
 | 抗尘埃药喝了没反应 | 提示「冷却中」→ 等 `anti_dust.cooldown-seconds`；提示「配方已失效」→ 该档位已被配置删除，`/rad dust list` 看现存档位 |
 | 旧配置启动报「完全免疫」错误 | v1.2 禁止任何材质满配 ≥ 1.0。把该材质系数调低（默认下界合金 0.72） |
 | 玩家反映穿下界合金也被晒死 | **v1.2 有意如此**（72% 减免、仍吃 28%）。想免疫请用抗尘埃药 |
+| **头顶看着是天空却仍掉血（v1.3 后）** | 先 `/rad status <玩家>` 看该轮判定。若判定为露天，说明列内确实有方块算遮蔽以外的判定成立；v1.3 已消除「判定抖动 / 无方块处掉血」。注意树叶、藤蔓、半砖、地毯、雪层、脚手架都可能算遮蔽 |
+| **判定时有时无 / 进门出门掉血不稳（v1.3 前）** | 已知缺陷，v1.3 已修复（缓存键含高度段导致同列结果互相覆盖）。升级 jar 即可，无需改配置 |
+| **站桩显示安全，跳一下就掉血（v1.3 前）** | 同上：跨 16 格段界换键重扫导致。v1.3 起一列只扫一次，与眼高无关 |
 
 **实机验收环境**：`test-server/`（Paper 1.21.11-132、离线模式、RCON 25764、superflat）**不入库**
 （含世界存档与明文凭据）。验证脚本见 [tools/](tools/)（RCON 客户端、日志读取、最小协议客户端），
@@ -538,11 +572,10 @@ tick-interval（≥20 全局任务）
 - **M3 ✅**：反馈层与对外 API——`CorrosionStageChangeEvent` + `HudRenderer`（纯函数双条）+ `FeedbackService`（actionbar 独立 1s 任务、阶段跳变 title+音效、受击粒子+音效、BossBar、reload 重建无泄漏、onDisable 全清）+ `DamageFeedbackHook` 受击挂点 + `DamageTagListener` 死亡文案 + `PlaceholderBridge` / PAPI + ProtocolLib 可选红闪抑制。新配置键 `bossbar-corrosion`(false)、`death-message`(true)、`protocol-lib`(auto) 全部带校验。
 - **M4 ✅**：实机验收（`test-server/` + Paper 1.21.11-132 + RCON）：插件实机启用/生成配置/坏配置 reload 拒载/控制台 status/onDisable 全部通过；**`libraries:` 通道实测失败 → 默认改 shade+relocate**；玩家侧项目转 17 项人工手册（§D）。
 - **命令层与日志优化 ✅（2026-10-25）**：`/rad` 子命令/别名/权限收敛到 `SubCommand` 枚举，输出按显示宽度对齐；启动日志改为 3 行紧凑摘要，与 `/rad status` 同源（`RadiationServices#describeFlags`）；粒子降级细节需 `-Dradsurvival.verbose=true` 才输出。
-- **v1.1 ✅**：判定链路加固 + 真实客户端复验（265 条测试全绿）——M4 的 §C.1 裁决被**推翻**，
-  修掉四处真实缺陷（[§9.1](#91-v11-判定链路加固四处真实缺陷)），移除会禁用服务端
+- **v1.1 ✅**：判定链路加固 + 真实客户端复验（全绿）——M4 的 §C.1 裁决被**推翻**，修掉四处真实缺陷（[§9.1](#91-v11-判定链路加固四处真实缺陷)），移除会禁用服务端
   re-configuration API 的 `PlayerLoginEvent` 监听。已用真实 1.21.11 客户端跑通：露天结算、
   腐蚀累加、夜晚 ×0.5、死亡文案、`/rad reload` 续接、铁甲玩家外部伤害按原版减免且护甲完好。
-- **v1.2 ✅（本期）**：护甲全面削弱 + 移除下界合金免疫 + 抗尘埃药（265 条测试全绿）。
+- **v1.2 ✅**：护甲全面削弱 + 移除下界合金免疫 + 抗尘埃药（265 条测试全绿）。
   - **护甲**：六材质系数 0.15/0.30/0.30/0.48/0.60/0.72，部位权重 0.12/0.46/0.30/0.12；
     新增硬校验禁止任何材质满配 ≥ 1.0；新增 `armor.min-damage-fraction`（默认 0.10）最低杀伤保底。
   - **免疫重构**：删除 `RadiationTask` 的 `armorReduction >= 1.0` 短路；`RoundResult.IMMUNE`
@@ -556,3 +589,15 @@ tick-interval（≥20 全局任务）
   - **实机复验**（Paper 1.21.11-132 + RCON）：插件启用无异常、启动日志含抗尘埃药装配行、
     `rad dust list/help`、`rad reload` / `--dry-run`、世界内结构（铁砧就位 + 8 邻为
     `#minecraft:logs`）与中心格作物全部核对通过。
+- **v1.3 ✅（本期）**：露天判定稳定性修复（268 条测试全绿）。
+  - **根因**：缓存键含眼睛所在的高度段，且扫描起点取该段底 → ① 同一方块列被不同高度段各扫一次、
+    结果互相覆盖 → 判定在相邻两轮之间来回切换；② 蹲下/站起/上下台阶跨 16 格段界即换键 →
+    重复整列扫描。
+  - **修复**：缓存键改为**方块列** `(world, sectionX, sectionZ)`（不含 y），扫描统一从世界
+    底部之下起算**整列**，同列任意眼位共享同一顶遮挡高度；缓存条目由「每 16³ 段一条」降为
+    「每 16×16 列一条」。旧 `ColumnKey.of(world, x, y, z)` 保留为 `@Deprecated`（y 被忽略）。
+  - **未改**：任何玩法数值（昼/夜系数、腐蚀、护甲、抗尘埃药）、异步管线、双层缓存结构、
+    冷启动同步直算、透明方块口径、维度豁免。
+  - **测试**：265 → 268（`verticalMovementDoesNotRescanOrFlip`、`columnScanCoversBelowEyeHeight`、
+    `cacheEntriesAreColumnScoped`），三条均做过反向验证。
+  - **升级**：`config.yml` 无任何变更，直接覆盖 jar 即可。

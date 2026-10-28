@@ -4,7 +4,7 @@
 > [ADVANCED.md](ADVANCED.md)，设计规格与决策记录看 [plan.md](plan.md)，实机验收证据看
 > [ACCEPTANCE.md](ACCEPTANCE.md)。
 >
-> 最后更新：2026-10-25（补充 CI/CD 工作流、架构决策记录、扩展点速查）
+> 最后更新：2026-10-27（§3.1 露天判定缓存与列键、§10.6 v1.3 判定稳定性修复、§8.4 测试分布）
 
 ---
 
@@ -12,12 +12,13 @@
 
 | 顺序 | 做什么 | 耗时 |
 |---|---|---|
-| 1 | 跑通 `mvn -B clean package`，确认 **265 条全绿** | ~2 min |
+| 1 | 跑通 `mvn -B clean package`，确认 **268 条全绿** | ~2 min |
 | 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
-| 3 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
-| 4 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
-| 5 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
-| 6 | **要改既有逻辑前**，先看 [§10.5 排查方法论](#105-v12-排查方法论怎么把看起来没问题的代码查出洞) | 8 min |
+| 3 | 读 [§3.1 露天判定的缓存与列键](#31-露天判定的缓存与列键v13-改写改判定前必读)，判定抖动的根因都在这里 | 5 min |
+| 4 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
+| 5 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
+| 6 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
+| 7 | **要改既有逻辑前**，先看 [§10.5 排查方法论](#105-v12-排查方法论怎么把看起来没问题的代码查出洞) | 8 min |
 
 > **最容易被忽略的一条**：本插件的伤害数字**不是**靠 `DamageType` 区分的，
 > 而是靠「结算瞬间摘掉盔甲 + 时间窗标记」这套机制。看到相关代码觉得绕，先读 §4.2。
@@ -32,7 +33,7 @@
 | 语言/JDK | Java **21**（`maven.compiler.release=21`） |
 | 构建 | Maven 3.10+，JDK 21（本机验证：`D:\java21`，Azul Zulu 21.0.12.1） |
 | 产物 | 自包含 fat jar，约 1.8 MB，内嵌库已 relocate 到 `com.ft.radsurvival.lib.*` |
-| 测试规模 | **265 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
+| 测试规模 | **268 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
 | NMS | **零依赖**（纯 Bukkit/Paper API） |
 
 **一句话架构**：`config` 解析并校验 → `core` 七单例承载全部纯逻辑 → `RadiationTask` 每
@@ -59,7 +60,9 @@ com.ft.radsurvival
 │   ├── ArmorCalculator    部位权重 × 材质系数 → 减免率
 │   │                      + applyFloor() 最低杀伤保底（v1.2）
 │   ├── DustImmunity       ★ 抗尘埃药免疫窗口（注入时钟，v1.2）
-│   ├── SunExposureChecker 露天判定（段缓存 + 异步补扫 + 粘滞层）
+│   ├── SunExposureChecker 露天判定（方块列缓存 + 异步补扫 + 粘滞层；v1.3 缓存键不含 y）
+│   │                      topmostCoverY / isSkyOpen / blockCountsAsCover 纯内核 + ColumnKey 列键
+│   │                      + columnScanStartY 整列起点 + ScanDispatcher 异步缝
 │   ├── CorrosionMeter     腐蚀值权威存储（内存）+ PDC 持久化 + 阶段回调
 │   ├── DamageApplier      事件广播 + 真实掉血（唯一伤害出口）
 │   ├── RadiationTask      主循环：过滤链 → 判定 → 腐蚀步进 → 免疫 → 伤害
@@ -138,6 +141,51 @@ RadiationTask.run()
 > 现在 `RoundResult.IMMUNE` 的唯一来源是 ⑥ 的抗尘埃药窗口；护甲只能减伤，且被 ⑦ 的保底兜住。
 > 免疫判定刻意放在 ⑤ **之后**——先累后打的口径不能因为免疫而松动（腐蚀照常在免疫窗口外累积，
 > 窗口内则完全不步进，避免「喝药期间偷偷攒腐蚀」和「喝药反而被腐蚀」两种观感都不对）。
+
+> **免疫的正确实现方式（易错）**：免疫**不是**「算完伤害再提前 return」，而是把免疫翻译成
+> 「本轮视作遮蔽」传给结算内核（`settle(id, exposed && !dustImmune, ...)`），让腐蚀步进走
+> **恢复分支**。这样「先累后打」的顺序不变，变的只是本轮累积速率取什么值。
+> 任何新增的「免疫 / 免伤」类机制都要自问一句：**累积速率归零了吗？**（详见 §10.4）
+
+### 3.1 露天判定的缓存与列键（v1.3 改写，改判定前必读）
+
+`SunExposureChecker` 分三层，改任何一层都要先弄清「缓存的键到底该由哪些轴决定」：
+
+| 层 | 作用 | 关键约束 |
+|---|---|---|
+| 纯内核 | `topmostCoverY(topYExclusive, startYInclusive, blockCovers)` 自上而下扫，首个阻挡即**顶遮挡**；`isSkyOpen` 是它的等价单点形态 | 无 Bukkit 依赖，可纯单测 |
+| 缓存 | 权威层（TTL 60s）+ 粘滞层（无过期、容量封顶） | 值是**顶遮挡高度**而非布尔 |
+| 适配 | `isExposed(World, Location)` 用 `BlockData#isOccluding()` + `!Block#isPassable()` 构造谓词 | 主线程守护：非主线程一律按露天保守应答 |
+
+**列键 `ColumnKey(world, sectionX, sectionZ)`——键里刻意不含 y**
+
+露天判定的扫描结果是**整列**的顶遮挡高度，与眼睛所在高度无关：`eyeY > topCover` 对列内任意眼位
+都精确成立。因此列内**所有眼高必须共享同一个缓存条目**。旧实现把 `sectionY` 编进键，且扫描起点
+取「该段底」，同时引入两个缺陷：
+
+1. **同列结果互相覆盖**：同一列被不同 y 段各扫一次，各自写入「从该段底起算」的顶遮挡。列内该
+   区间没有遮挡时，各段算出的哨兵值**互不相同且都偏高** → 同一列上的判定在相邻两次结算之间
+   来回切换，表现为「贴墙/进出门时判定时有时无」。
+2. **重复整列扫描**：默认眼高 1.62 = 第 4 段、蹲下 1.27 = 第 3 段，**蹲下站起就换键** →
+   重新自上而下扫一遍；地面附近上下移动则几乎每轮都在扫。
+
+修复要点：
+- 键去掉 y（`ColumnKey.of(world, x, z)`；三参重载保留为 `@Deprecated`，y 被忽略）；
+- 扫描起点统一取 `columnScanStartY()`（世界底部之下），**不能复用眼高所在的段底**——
+  否则段底以下、眼位以上的空白会被漏掉，低眼位被误判为遮蔽（**漏判危险**，比误判安全更糟）。
+
+**通用教训**：任何「按段缓存派生量」的缓存都要问一句——**这个派生量与段的哪些轴真正相关？**
+本处的派生量（顶遮挡高度）只与 x/z 列相关，y 是**查询参数**而不是**键的一部分**。
+（`SunExposureCheckerTest#cacheEntriesAreColumnScoped` 用条目数把这条钉死。）
+
+**三层读取顺序**（`isExposed` 的缓存入口）：
+1. 权威命中 → 直接按真实眼位判（列内任意眼高精确）；
+2. 权威过期但有粘滞值且 `async-exposure-scan: true` → 当轮返回**上一已知判定**，同时按列去重
+   派发一次异步补扫（主线程零方块读取）；
+3. 冷启动（从未记录过该列）/ 同步模式 → 主线程直算，首轮精度与同步口径完全一致。
+
+异步任务内异常一律吞掉、不发布、释放在途标记、下轮自然重试——**绝不反噬结算主线**。
+
 
 ---
 
@@ -257,7 +305,7 @@ src/test/java/com/ft/radsurvival/
 ```powershell
 $env:JAVA_HOME='D:\java21'
 $env:MAVEN_OPTS='-Duser.language=en -Dfile.encoding=UTF-8'   # 避免 GBK 下中文编译错误
-mvn -B clean package            # 全量（265 条）
+mvn -B clean package            # 全量（268 条）
 mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 ```
 
@@ -290,7 +338,23 @@ mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 
 - 纯逻辑优先放 `core/`（快、无依赖）；
 - 只要碰 Bukkit 事件/PDC/命令，就放 `mockbukkit/` 并用 `Support.install(...)` 统一装配；
-- 「回归钉子」请在注释里写清**钉的是什么 bug**（本仓库历史修复均有此标注）。
+- 「回归钉子」请在注释里写清**钉的是什么 bug**（本仓库历史修复均有此标注）；
+- **回归钉子必须做一次反向验证**：把修复改回去，确认测试变红，再改回来。不做这一步的回归测试
+  有一半是装饰品（§10.5 ①，v1.3 的三条钉子均按此流程验证）。
+
+### 8.4 测试分布（v1.3，共 268 条）
+
+| 位置 | 内容 | 特点 |
+|---|---|---|
+| `config/` | `PluginConfigValidationTest`、`PluginConfigFeedbackValidationTest` | 纯 Java，无需服务器；**新增配置键必须在这里加校验断言** |
+| `core/` | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键回归**）、`DustImmunity`、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
+| `feedback/` | `HudRendererTest`（纯字符串渲染） | 新宽字符要进 `WIDE_SYMBOLS` |
+| `listener/` | `SunRadiationListenerTest`（伤害通道归因纯内核） | `classify` 四条件 |
+| `mockbukkit/` | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` | 生产代码路径，除两个注入缝外不 mock |
+
+> **判定类测试的盲区**：`SunExposureCheckerTest` 之外，所有集成测试都用**固定眼高**。
+> v1.3 的两个缺陷正是这样在 265 条全绿的套件里活了一整个版本。
+> 新增判定相关测试时，务必覆盖「同一位置、眼高变化」这一维度。
 
 ---
 
@@ -304,11 +368,14 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 
 **发布检查单**
 
-1. `mvn -B clean package` → `Tests run: 265, Failures: 0`
+> v1.3 起：第 1~4 项已由 CI 的「Verify tests actually ran」与「Verify fat jar self-containment」
+> 两步**自动执行**（push/PR 都会跑）；本清单保留给本地发版前的人工复核。
+
+1. `mvn -B clean package` → `Tests run: 268, Failures: 0, Errors: 0, Skipped: 0`
 2. 产物大小约 1.8 MB；jar 内 `com/ft/radsurvival/lib/*` ≥ 1259 项；
    `org/spongepowered/*`、`com/github/benmanes/*` **零泄漏**；
 3. 内嵌 `config.yml` 与 `src/main/resources/config.yml` **逐字节一致**；
-4. `plugin.yml` 无 `libraries:` 块（fat jar 口径）；
+4. `plugin.yml` 无 `libraries:` 块（fat jar 口径），且 `version` == 发布构建号；
 5. 同步 `target/` → `dist/` → `test-server/plugins/`，三处 SHA-256 一致；
 6. 实机冒烟：删 `.paper-remapped` 缓存 → 启服 → 确认 `Enabling` 且**无异常栈**。
 
@@ -323,7 +390,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | `damage(double, DamageCause)` | 1.21.11 已移除 → 改用 `DamageSource` + `DamageType.GENERIC` |
 | MockBukkit 坐标 | `com.github.seeseemelk` 旧包钉死 1.21.1 会崩 → 用 `org.mockbukkit.mockbukkit:mockbukkit-v1.21:4.116.3` |
 | 段缓存布尔误判 | 旧实现缓存"是否露天"→ 同段不同眼位互相污染；现缓存**顶遮挡高度**，任意 eyeY 精确派生 |
-| **段缓存 y 键冗余（v1.3）** | 缓存键含 `sectionY` → 跨段界重扫 + 段间结果互相覆盖（判定抖动）。已改为按方块列缓存、整列扫描，见 §10.4 |
+| **段缓存 y 键冗余（v1.3）** | 缓存键含 `sectionY` + 扫描起点取段底 → 跨段界重扫 + 段间结果互相覆盖（判定抖动 / 无方块处掉血）。已改为按方块列缓存、整列扫描，见 §10.4 |
 | HUD 陈旧镜像 | 旧实现读结算镜像，被过滤轮次不刷新 → 改读 `previewRound` 实时快照 |
 | 腐蚀只在 quit 落盘 | 强杀丢整段会话 → 改为**每轮值变化即写** PDC |
 | **原版护甲二次减免（v1.1 修复）** | GENERIC **走**护甲减免（旧验收用裸僵尸测出的"不吃甲"是空甲巧合）→ 双重减免 + 安全区伤害被吞成 0。改为结算瞬间摘甲/还甲 + 太阳伤害门控，详见 10.3 |
@@ -331,7 +398,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | **`PlayerLoginEvent` 的能力代价** | 任何插件监听它都会让 Paper 打印 `[HorriblePlayerLoginEventHack]` 并使 re-configuration API 失效 → **本项目刻意不监听**；异步登录阶段触达玩家状态会触发线程断言 |
 | **`getState()` 是快照（v1.2 踩坑）** | 对 `block.getState()` 的容器 `setItem` 后 `update()` 不保证生效，且「读中心格→写回剩余」会互相覆盖。容器读写统一走 `BlockInventoryHolder#getInventory()`（`DustCraftStructure.inventoryOf`） |
 | **`org.bukkit.Tag` 需注册表（v1.2 踩坑）** | 纯 JUnit 下 `Tag.ANVIL` 静态初始化直接 `ExceptionInInitializerError`。用 Tag 的判定只能放 `mockbukkit/` 测 |
-| **露天缓存键含 y 段 → 判定抖动 + 重复整列扫描（v1.3 修复）** | 顶遮挡是**整列**属性，与眼高无关。旧 `ColumnKey` 把 `sectionY` 编进键：① 玩家上下移动跨过 16 格段界（默认眼高 1.62=第4段、蹲下 1.27=第3段）即换键 → 每轮重新自上而下扫整列；② 同一列被不同 y 段各扫一次，各自写入「**从该段底起算**的顶遮挡」，无遮挡段算出互不相同的偏高哨兵 → 同一列上判定来回切换，玩家体感「明明头顶没方块却掉血 / 一下安全一下不安全」。修复：键改为 `ColumnKey(world, sectionX, sectionZ)`，扫描统一从 `columnScanStartY()`（= 0−1，低于任何可放置方块）起算整列。**任何「按段缓存派生量」的缓存都要问一句：这个派生量与段的哪些轴真正相关？** |
+| **露天缓存键含 y 段 → 判定抖动 + 重复整列扫描（v1.3 修复）** | 顶遮挡是**整列**属性，与眼高无关。旧 `ColumnKey` 把 `sectionY` 编进键：① 玩家上下移动跨过 16 格段界（默认眼高 1.62=第4段、蹲下 1.27=第3段）即换键 → 每轮重新自上而下扫整列；② 同一列被不同 y 段各扫一次，各自写入「**从该段底起算**的顶遮挡」，无遮挡段算出互不相同的偏高哨兵 → 同一列上判定来回切换，玩家体感「明明头顶没方块却掉血 / 一下安全一下不安全」。修复：键改为 `ColumnKey(world, sectionX, sectionZ)`，扫描统一从 `columnScanStartY()`（= 0−1，低于任何可放置方块）起算整列。**任何「按段缓存派生量」的缓存都要问一句：这个派生量与段的哪些轴真正相关？** 详见 §10.6 |
 | **`CommandOutput.percent` 收的是比例** | 传 `0.72` 输出 `72%`；早期误乘 100 导致 `/rad status` 印出 `7200%`（测试抓到） |
 | **原版 `USE_COOLDOWN` 不能写在自定义药水上** | 它的冷却分组是原版共享的，写进去会和原版食物/药水互相卡冷却。冷却靠取消 `PlayerItemConsumeEvent`（取消不掉物品）自管 |
 | **构建混淆（ProGuard）** | **不可行，已放弃**，详见下节 |
@@ -356,7 +423,8 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 
 ### 10.2 CI/CD 工作流（`.github/workflows/build-release.yml`）
 
-推送到 `main` / 手动触发 → 构建 + 全量测试 + 发布 Release；PR 只构建不发布。
+推送到 `main` / 手动触发 → 构建 + 全量测试 + fat jar 自检 + 发布 Release；PR 跑同样的检查但不发布。
+v1.3 起做了一轮优化（序号统计防呆、门禁加强、发布幂等、检查单自动化），要点见下表末四行。
 
 **产物命名**：`RadSurvival-<yyyy>-<MM>-<dd>-<当天第几次构建>.jar`，如 `RadSurvival-2026-10-25-3.jar`。
 
@@ -366,8 +434,12 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 | 日期按 Asia/Shanghai 分桶 | Runner 是 UTC，直接 `date` 会跨日错位 |
 | 用 `jq` 的 `fromdateiso8601 \| . + 28800 \| strftime(...)` 而非 `date -d` | `date -d` 在各种实现下行为不一致（Git Bash 的 `date -u` 实测不换算时区），jq 是确定性的 |
 | `-Drevision=<yyyy-MM-dd-N>` 注入 `plugin.yml` | 让游戏内 `/version` 与下载文件名一致；本地不传该参数则仍是 `1.0.0-SNAPSHOT` |
-| 门禁：测试数 ≥ 100 | 防配置漂移导致 Surefire 静默跳过测试、坏包照发 |
 | `concurrency.cancel-in-progress: false` | 中途取消会让序号出现空洞 |
+| **门禁（v1.3 加强）**：测试总数 ≥ 200 且 Failures/Errors/Skipped 全 0（awk 直接从 surefire 求和，不依赖 bc） | 原「≥100」对「丢了一半测试/被跳过」不设防；「全绿无跳过」是文档口径，就该钉在 CI 上 |
+| **fat jar 自检五项（v1.3）**：relocated 条目 ≥1200、原始包零泄漏、`plugin.yml` 无 `libraries:`、`version`==构建号、内嵌 `config.yml` 逐字节一致 | 把 §9 人工检查单第 2~4 项自动化——人肉检查会漏，CI 不会 |
+| **发布幂等（v1.3）**：同名 tag 已存在时 `gh release edit` + `upload --clobber` 原位更新 | 产物名即 tag，同日重跑（或序号回退）不该炸；「重跑一次 = 最新产物」 |
+| **Release notes 走 `--notes-file`，heredoc 内容与脚本同缩进**（v1.3） | markdown 行首 ≥4 空格会渲染成代码块、表格失效；`run:` 块内缩进会被 YAML 原样保留，必须顶格 |
+| `timeout-minutes: 25`（v1.3） | 远端仓库偶发 socket 挂起（§2.2 同源问题），挂死的 run 会堵死并发队列 |
 
 **踩过的坑**
 
@@ -541,8 +613,54 @@ v1.2 上线前做了一轮定向排查，从「代码已通过全部测试」的
 
 ---
 
-## 11. 后续方向（plan.md 文末候选）
+### 10.6 v1.3 露天判定稳定性（缓存键的维度错误，本轮踩坑）
 
+**现象**（玩家报的，不是测试报的）：站在平整地面、头顶完全开阔，却被判定为露天持续掉血；
+在建筑边缘、门口、台阶处进出时，判定「时有时无」——同一位置站着不动，有时安全有时不安全。
+
+**根因**：`ColumnKey` 把 `sectionY` 编进了缓存键，同时扫描起点取「眼高所在段的段底」。
+两处一起，制造了**两个**后果：
+
+1. **同列结果互相覆盖（症状 A）**：同一方块列被不同 y 段各扫一次，每次只从段底往上扫，写入的
+   是「从该段底起算」的顶遮挡。若列内该区间没有遮挡，各段算出的哨兵值互不相同且都偏高 →
+   `eyeY > topCover` 在两份值之间来回翻转。
+2. **重复整列扫描（症状 B）**：默认眼高 1.62 落在第 4 段、蹲下 1.27 落在第 3 段，**蹲下站起
+   就换键** → 重新自上而下扫整列。地面附近活动几乎每轮都在扫，主线程开销凭空翻倍。
+
+**判断依据**：顶遮挡是**整列**属性（列内唯一的方块序列决定的），与眼睛高度无关；
+眼睛高度只是**查询参数**（`eyeY > topCover`），不是**键的一部分**。
+修复后 `ColumnKey(world, sectionX, sectionZ)`，扫描起点 `columnScanStartY()` 取世界底部之下。
+
+| 修复前 | 修复后 |
+|---|---|
+| 键 = 世界 + x段 + **y段** + z段（每 16³ 段一条） | 键 = 世界 + x段 + z段（每 16×16 列一条） |
+| 扫描起点 = 眼高所在段底（`16k + 1`） | 扫描起点 = `MIN_BUILD_HEIGHT − 1`（整列） |
+| 蹲下站起 → 换键 → 重扫 | 列内任意眼高 → 共享同一条缓存 |
+| 同列多个哨兵值互相覆盖 → 判定抖动 | 每列一个权威顶遮挡 → 判定稳定 |
+
+**三条回归钉子**（都在 `core/SunExposureCheckerTest`，且**都做过反向验证**）：
+
+| 测试 | 钉的是什么 | 反向验证结果 |
+|---|---|---|
+| `verticalMovementDoesNotRescanOrFlip` | 列内上下移动（63/64/80 跨 y 段界）不得重扫、不得翻转 | 键改回含 y 段 → **变红** |
+| `columnScanCoversBelowEyeHeight` | 扫描必须覆盖整列：高眼位写入的值不得让低眼位误判遮蔽 | 扫描起点改回段底 → 变红 |
+| `cacheEntriesAreColumnScoped` | 同一列任意眼高只占 **1 条**缓存，跨段 x/z 各 1 条 | 键改回含 y 段 → **变红** |
+
+**踩坑提醒（本轮实际踩到）**
+
+| 坑 | 事实 |
+|---|---|
+| **漏判危险 > 误判安全** | 扫描起点若取段底，低眼位会被判成遮蔽 = **该掉血的地方不掉血**；这比「不该掉血却掉」更糟（玩家会在阳光直射下安然无恙，机制整个失效）。任何判定 fallback 都按「宁可多掉血」方向倾斜 |
+| **`columnScanStartY()` 不能随手调高** | 注释里写的「不必要也不危险的余量」是**错的直觉**：起点越高，整列扫描越短，但一旦高过列内真实顶遮挡，就会漏判。起点只允许往低处放宽，往高收紧必须同时改缓存值与判据 |
+| **测试绿 ≠ 判定对** | 这两个缺陷在 265 条全绿的套件里存活了整整一个版本——因为所有既有测试都用**固定眼高**查询。新增测试必须覆盖「同一位置、眼高变化」这一维度 |
+| **Windows 上用 PowerShell 改源文件会毁中文** | `Get-Content -Raw` 默认按 GBK 解码，`Set-Content` 再按 GBK 写回 → 源码里的中文注释全部变成「unmappable character」编译错误。批量改代码要么用编辑器，要么显式 `[System.IO.File]::ReadAllText/WriteAllText` + `UTF8Encoding`，并且**改完 `git diff` 复核** |
+
+**判定链路的其它缓存**：这轮顺带复核了 `DayNightProvider` / `ArmorCalculator` / `CorrosionMeter` /
+`HudRenderer`，均无同类「键维度错误」——它们不缓存任何与位置相关的派生量。
+
+---
+
+## 11. 后续方向（plan.md 文末候选）
 1. **§7 服务端品牌自适应 Profile**（Folia/Spigot 防御识别）——优先级最高，
    涉及 `RadiationServices` 的调度抽象，需同步改 `ScanDispatcher` 注入点。
 2. **§4.1 辐射病模式**——腐蚀阶段挂 Debuff，挂点在 `CorrosionMeter` 的阶段回调。
@@ -555,7 +673,8 @@ v1.2 上线前做了一轮定向排查，从「代码已通过全部测试」的
 ## 12. 交接说明（给下一位维护者）
 
 **当前状态**：M1–M4 完成并实机验收；命令层与日志优化已完成并验证；构建混淆已评估并
-**明确放弃**；v1.1 判定链路加固已完成；**v1.2 护甲削弱 + 抗尘埃药已完成（265 条测试全绿）**；
+**明确放弃**；v1.1 判定链路加固已完成；v1.2 护甲削弱 + 抗尘埃药已完成；
+**v1.3 露天判定稳定性修复已完成（268 条测试全绿）**；
 CI/CD 自动发行已上线（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
 **产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
@@ -568,7 +687,7 @@ GitHub Releases（唯一发布源）
 本地构建仍产出 `target/RadSurvival.jar`（版本号 `1.0.0-SNAPSHOT`），仅用于自测与实机冒烟。
 `test-server/` **不入库**（世界存档 + 明文凭据），验证脚本在 [tools/](tools/)。
 
-**接手后第一件事**：跑一次 `mvn -B clean package` 确认 265 条全绿。
+**接手后第一件事**：跑一次 `mvn -B clean package` 确认 268 条全绿。
 
 > 文档改动不涉及代码，产物无需重建。
 
@@ -616,7 +735,7 @@ GitHub Releases（唯一发布源）
 | 改腐蚀放大曲线 | `RadiationMath` 的 curve 分支 | `corrosion.curve` 合法值集合 | `RadiationMathTest` |
 | 改 HUD 显示 | `HudRenderer`（纯函数） | 新宽字符要加进 `WIDE_SYMBOLS` | `HudRendererTest` |
 | 加表现层效果 | `FeedbackService` | 用完要能在 `shutdown()` 解绑 | `CorrosionStageFeedbackMockBukkitTest` |
-| 改露天判定 | `SunExposureChecker`（内核）+ 适配层 | 异步路径见 §8 | `SunExposureCheckerTest` |
+| 改露天判定 | `SunExposureChecker`（内核）+ 适配层 | **缓存键必须只含判决真正依赖的轴**（v1.3：顶遮挡只与 x/z 列有关）；异步路径见 §3.1 / §8 | `SunExposureCheckerTest`（含 `verticalMovementDoesNotRescanOrFlip`、`columnScanCoversBelowEyeHeight`、`cacheEntriesAreColumnScoped`） |
 | 加对外事件 | `api/` 包 | 只加不改，保持二进制兼容 | `RadiationExposureEventChainTest` |
 | 改抗尘埃药档位/作物 | `config.yml` 的 `anti_dust.levels` | 档位顺序即优先级，重复作物会拒载 | `PluginConfigValidationTest` + `AntiDustChainMockBukkitTest` |
 | 加一个新的「自制物品」 | `item/` 包（照 `DustItemFactory`） | 基底材质 + PDC 标识 + 组件；**不能造新 ID** | 物品工厂测试（PDC 往返 / 组件存在） |
@@ -629,6 +748,7 @@ GitHub Releases（唯一发布源）
 | `RadiationTask.ExposureResolver` | 露天判定 | 绕开 MockBukkit 未实现的 `BlockData#isOccluding` |
 | `DamageApplier.DamageExecutor` | 真实掉血 | 绕开 MockBukkit 未实现的 `damage(double, DamageSource)` |
 | `SunExposureChecker.ScanDispatcher` | 异步补扫 | 单测注入直连/队列执行器，生产传 `runTaskAsynchronously` |
+| `SunExposureChecker` 的 `LongSupplier nanoClock` + `ttl`/`maxEntries` | 缓存 TTL / 容量 / v1.3 列粒度 | 假时钟推进测过期；`cachedEntries()` 断言列粒度不随眼高增长 |
 | `SunRadiationListener` 的 `LongSupplier clock` | 时间窗判定 | 免 sleep 测窗口过期 |
 | `DustImmunity` 的 `LongSupplier clock`（v1.2） | 免疫窗口 | 免 sleep 精确测边界（`DustImmunityTest`） |
 | `CorrosionMeter` 阶段回调 | 阶段播报 | 记录/断言跨阈值 |
@@ -750,8 +870,14 @@ GitHub Releases（唯一发布源）
 4. 改了 CI 行为 → 同步 §10.2 与本表。
 5. **注释即需求**：凡是注释里写了「零累积 / 不消耗 / 退回原版 / 已清理」这类承诺，
    必须能在下一行代码里找到对应语句。写不出来的就从注释里删掉，别让它变成谎言（见 §10.5 ③）。
+   > 已知待清理的一处：`core/RadiationTask` 类注释仍写「减免 ≥ 1.0 完全免疫短路」，该分支已在
+   > v1.2 删除，注释属过时表述（行为以 §3 与 `RoundResult.IMMUNE` 的 javadoc 为准）。
 6. **批量文本替换后要抽查**：全局换数字（测试条数、版本号）极易误伤端口/坐标/版本串，
    替换后 `grep` 一遍形似端口或坐标的结果（见 §10.5 ⑤）。
+7. **改缓存/判定逻辑 → 同步 §3.1 与 §10.6**，并在测试里覆盖「同一位置、参数变化」的维度
+   （v1.3 的教训：固定参数的测试套件查不出键维度错误）。
+8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 268 条。改完测试务必同步本文 §8.4、
+   发布检查单、ADVANCED §2.3 与 ACCEPTANCE 对应小节——历史上这里就漂移过（265 vs 267）。
 
 > **文档里的相对链接请检查锚点**：GitHub 把标题转锚点时**会去掉点号**，
 > `### 3.2 armor — 盔甲减免` → `#32-armor-盔甲减免`（不是 `#3-2-...`）。改标题后旧链接会失效。

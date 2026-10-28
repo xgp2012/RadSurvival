@@ -265,4 +265,10 @@ String full  = server.getVersion();  // 含构建号
 FATAL 级考量后**不采用构建混淆**（ProGuard 在 Java 21 + 内嵌 Caffeine 组合下存在运行期
 `VerifyError` 与阶段竞态，收益不抵风险，详见 DEVELOPMENT.md §10.1）。二次开发请以
 [DEVELOPMENT.md](DEVELOPMENT.md) 为准。
+**2026-10-27 增量（v1.3）**：露天判定稳定性修复——缓存键去掉 y 维度，改为按**方块列**
+`(world, sectionX, sectionZ)` 缓存，扫描起点改为整列底部（`columnScanStartY()`）。本文 §1.1
+原案「按 `(x, y, z)` chunk 段缓存」的写法**已被实现修正**：顶遮挡是整列属性，与眼高无关，
+把 y 段编进键会让同一列被不同高度段各算一次、结果互相覆盖（判定抖动），且蹲起跨段界即重扫。
+玩法数值与其余设计口径全部未变。测试 265 → 268，详见 CHANGELOG v1.3 与 DEVELOPMENT §3.1 / §10.6。
+
 **下一步（候选）**：§7 服务端品牌自适应 Profile（Folia/Spigot 防御识别优先）→ §4.1 辐射病模式 → §4.2 防护装备体系。
