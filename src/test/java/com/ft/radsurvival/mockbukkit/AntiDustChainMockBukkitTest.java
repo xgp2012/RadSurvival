@@ -190,8 +190,8 @@ class AntiDustChainMockBukkitTest {
     }
 
     @Test
-    @DisplayName("背包满：药水掉脚下但**作物不消耗**（旧实现在这里会把整组作物写回 → 可无限刷药）")
-    void fullInventoryDoesNotConsumeCrop() {
+    @DisplayName("背包满：整单失败——不产出药水、也不扣作物（产出与支付必须同生共死）")
+    void fullInventoryConsumesNothing() {
         Block core = buildStructure(Material.DISPENSER);
         putCenter(core, Material.WHEAT, 2);
         // 把背包彻底塞满，addItem 必然失败
@@ -200,14 +200,41 @@ class AntiDustChainMockBukkitTest {
         }
         int made = plugin.dustGui().craft(player, core, core.getRelative(BlockFace.UP));
 
-        assertThat(made).isZero();
-        // 关键断言：作物数量没变（不会被白扣，也不能借此刷药）
-        assertThat(DustCraftStructure.centerItem(core).getAmount()).isEqualTo(2);
-        assertThat(countDust()).isZero();
-        // 药水掉在脚下（世界里有掉落物），但玩家背包里没有
+        // bug hunt P0-1：旧实现「溢出就丢地上 + return 0 不扣作物」= 无限刷药。
+        // 正确语义是「放不下就整单失败」：既没有药水（背包或地面都没有），作物一个不少。
+        assertThat(made).as("背包满 → 整单失败").isZero();
+        assertThat(DustCraftStructure.centerItem(core).getAmount())
+                .as("作物不得被扣").isEqualTo(2);
+        assertThat(countDust()).as("背包里没有药水").isZero();
         assertThat(world.getEntitiesByClass(org.bukkit.entity.Item.class))
-                .withFailMessage("背包满时应把药水丢在脚下")
-                .isNotEmpty();
+                .as("地面上也不得掉出药水——掉出来就等于「已产出」，而作物没扣就是刷药")
+                .isEmpty();
+
+        // 连续尝试多次：任何一次都不得产出（旧实现每按一次多一瓶）
+        plugin.dustGui().craft(player, core, core.getRelative(BlockFace.UP));
+        plugin.dustGui().craft(player, core, core.getRelative(BlockFace.UP));
+        assertThat(world.getEntitiesByClass(org.bukkit.entity.Item.class))
+                .as("反复尝试仍然零产出").isEmpty();
+        assertThat(DustCraftStructure.centerItem(core).getAmount()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("背包只剩一个空位：正常产出一瓶并扣 1 个作物（hasSpaceFor 不误伤可容纳场景）")
+    void oneFreeSlotStillCrafts() {
+        Block core = buildStructure(Material.DISPENSER);
+        putCenter(core, Material.WHEAT, 2);
+        // 留出 5 个空位（药水最大堆叠 8，足够收下 1 瓶），其余塞满
+        for (int slot = 0; slot < player.getInventory().getSize(); slot++) {
+            player.getInventory().setItem(slot, new ItemStack(Material.STONE, 64));
+        }
+        for (int slot = 0; slot < 5; slot++) {
+            player.getInventory().setItem(slot, null);
+        }
+
+        assertThat(plugin.dustGui().craft(player, core, core.getRelative(BlockFace.UP)))
+                .as("有空位就该成功").isEqualTo(1);
+        assertThat(countDust()).isEqualTo(1);
+        assertThat(DustCraftStructure.centerItem(core).getAmount()).isEqualTo(1);
     }
 
     @Test

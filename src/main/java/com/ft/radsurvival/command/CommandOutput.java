@@ -79,9 +79,16 @@ final class CommandOutput {
      */
     private static final String WIDE_SYMBOLS = "▲△▸●◆✔✖▓░";
 
-    /** 单字符显示宽度。 */
+    /** 单字符显示宽度（Minecraft 默认字体）。 */
     private static int charWidth(char c) {
-        if ((c >= 0x2E80 && c <= 0xA4CF) || (c >= 0xFF00 && c <= 0xFF60)) {
+        // bug hunt P2-6：原来把整段 0x2E80–0xA4CF 一律按 2 列计，但该区间里混着
+        // 0x303F、0x33FF、0xA000–0xA48F（彝文）等**实际 1 列**的码位。
+        // 以这些字符打头的键名会被多算 1 格，导致后续整列对齐漂移。
+        // 收紧为三个真正的全角区间（覆盖现有全部中文键名，行为不变）。
+        if ((c >= 0x4E00 && c <= 0x9FFF)        // CJK 统一表意文字（中文主体）
+                || (c >= 0x3000 && c <= 0x303E)  // CJK 标点（、。「」【】等，实测 2 列）
+                || (c >= 0xFF01 && c <= 0xFF60)  // 全角 ASCII 变体
+                || (c >= 0xFFE0 && c <= 0xFFE6)) { // 全角符号（￠￡￥等）
             return 2;
         }
         return WIDE_SYMBOLS.indexOf(c) >= 0 ? 2 : 1;

@@ -49,6 +49,16 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
     /** 腐蚀管理命令权限（§1.6/§3；plugin.yml 已声明 default: op）。 */
     public static final String PERMISSION_ADMIN = "radsurvival.admin";
 
+    /**
+     * 能否查看<b>他人</b>的防护细节（盔甲减免 / 最低杀伤 / 预计伤害）。
+     *
+     * <p>bug hunt P1-4：这些是 PVP 场景下的对手情报，`/rad status &lt;他人&gt;` 又无权限门槛，
+     * 因此只有管理员可见；查自己不受限。</p>
+     */
+    private static boolean canInspectOthers(CommandSender sender) {
+        return sender.hasPermission(PERMISSION_ADMIN);
+    }
+
     private static final List<String> CORROSION_OPS = List.of("get", "set", "add");
 
     /** v1.2 /rad dust 的动作（补全与校验共用）。 */
@@ -108,20 +118,24 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         if (args.length == 2) {
             return filter(DUST_OPS, args[1]);
         }
+        String op = args[1].toLowerCase(Locale.ROOT);
         if (args.length == 3) {
-            String op = args[1].toLowerCase(Locale.ROOT);
             return op.equals("give") ? filter(dustLevelIds(), args[2]) : List.of();
         }
         if (args.length == 4) {
-            return filter(onlinePlayerNames(), args[3]);
+            // bug hunt P2-5：只有 give 消费玩家名参数；list/help 给出玩家名补全
+            // 会让玩家以为「/rad dust list <玩家>」可用，实际第四个参数被忽略。
+            return op.equals("give") ? filter(onlinePlayerNames(), args[3]) : List.of();
         }
         return List.of();
     }
 
-    /** 配置里的档位 id（未就绪时退回内置四档，保证补全不会空手）。 */
+    /** 配置里的档位 id（未就绪或档位表为空时退回内置四档，保证补全不会空手）。 */
     private List<String> dustLevelIds() {
         PluginConfig cfg = plugin.config();
-        if (cfg == null) {
+        // bug hunt P2-5：levels 为空（服主写了 `levels: []`）时也要退化到内置表，
+        // 否则补全给出空列表，与执行路径的「永远失败」互相印证，看不出是配置问题。
+        if (cfg == null || cfg.antiDust().levels().isEmpty()) {
             return List.of("refined", "strong", "improved", "crude");
         }
         return cfg.antiDust().levels().stream().map(PluginConfig.DustLevel::id).toList();
@@ -238,6 +252,11 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
                 + (enabledHere ? "§a白名单内" : "§c不在白名单"));
         out.kv("生效维度", "§e" + cfg.dimensions());
 
+        // bug hunt P1-4：盔甲减免 / 最低杀伤 / 预计伤害属于「他人防护情报」。
+        // 非管理员查询他人时隐藏这三项——PVP 服上这等于免费侦察对手装备，
+        // 而 /rad status 本身没有任何权限门槛。
+        boolean canSeeEquipment = canInspectOthers(sender) || sender == target;
+
         out.section("判定");
         out.kv("昼夜阶段", "§e" + preview.phase().displayName()
                 + " §8timeFactor=§e" + CommandOutput.fixed(preview.timeFactor(), 3)
@@ -254,10 +273,14 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
                     : "§a● 安全 §8（遮蔽/豁免维度）");
         // v1.2：护甲不再有「完全免疫」分支，改为展示「满配上限」与「最低杀伤保底」
         // 注意 CommandOutput.percent 收「比例」（0.72 → "72%"），不要再乘 100
-        out.kv("盔甲减免", "§e" + CommandOutput.percent(preview.armorReduction())
-                + " §8（最强材质满配上限 " + CommandOutput.percent(cfg.armor().maxFullSetReduction()) + "）");
-        out.kv("最低杀伤", "§e" + CommandOutput.percent(cfg.armor().minDamageFraction())
-                + " §8（护甲再厚也保底吃这一份）");
+        out.kv("盔甲减免", canSeeEquipment
+                ? "§e" + CommandOutput.percent(preview.armorReduction())
+                    + " §8（最强材质满配上限 " + CommandOutput.percent(cfg.armor().maxFullSetReduction()) + "）"
+                : "§8— §7（他人装备细节仅管理员可见）");
+        out.kv("最低杀伤", canSeeEquipment
+                ? "§e" + CommandOutput.percent(cfg.armor().minDamageFraction())
+                    + " §8（护甲再厚也保底吃这一份）"
+                : "§8— §7（他人装备细节仅管理员可见）");
         out.kv("抗尘免疫", dustSeconds > 0
                 ? "§b" + dustSeconds + "s §8（" + cfg.antiDust().hudImmuneMark() + "）"
                 : "§8—");
@@ -270,8 +293,10 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
 
         out.section("本轮");
         out.verdict(verdictMark(preview),
-                "§f" + preview.result().describe() + " §8| §f伤害 " + damageText(preview)
-                        + (preview.result() == RoundResult.DAMAGED ? " §8（预计本轮结算，未落地）" : ""));
+                "§f" + preview.result().describe() + " §8| §f伤害 "
+                        + (canSeeEquipment ? damageText(preview) : "§8—")
+                        + (canSeeEquipment && preview.result() == RoundResult.DAMAGED
+                            ? " §8（预计本轮结算，未落地）" : ""));
 
         out.section("关键配置");
         out.kv("关键配置", "§7tick=" + cfg.tickInterval()
@@ -339,6 +364,16 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
         RadiationServices services = plugin.services();
         if (services == null) {
             notReady(sender);
+            return;
+        }
+        // bug hunt P1-3：force-check 走的是**真实结算**（步进腐蚀 + 广播事件 + 真实掉血 + 写 PDC），
+        // 不是只读预览。若对所有人开放，玩家连按命令就能把结算节律从「每 tick-interval」
+        // 变成「每次按键」，腐蚀推进速度完全由他自己决定。因此要求管理权限——
+        // 与 corrosion set/add 同级，因为它们是同一类「改写玩家辐射状态」的操作。
+        // 普通玩家需要自查时用 /rad status（只读、零副作用），help 里已如此指引。
+        if (!sender.hasPermission(PERMISSION_ADMIN)) {
+            sender.sendMessage("§c缺少权限：" + PERMISSION_ADMIN
+                    + "§7（§8/rad force-check 会真实结算并改写腐蚀，属管理操作；自查请用 §f/rad status§7）");
             return;
         }
         Player target = resolveTarget(sender, args);

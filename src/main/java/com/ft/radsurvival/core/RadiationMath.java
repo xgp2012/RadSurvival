@@ -21,13 +21,23 @@ public final class RadiationMath {
 
     // ---------------------------------------------------------------- 钳制
 
-    /** 把腐蚀值钳到 [0,100]（§1.6）。 */
+    /** 把腐蚀值钳到 [0,100]（§1.6）。NaN/Infinity 视为下界 0（bug hunt P1-5）。 */
     public static double clampCorrosion(double value) {
+        if (!Double.isFinite(value)) {
+            // NaN 会让 Math.min/max 原样透传（NaN 与任何值比较均为 false），
+            // 一旦漏进内存权威值就会顺着 PDC 落盘写坏玩家数据。
+            return CORROSION_MIN;
+        }
         return Math.min(CORROSION_MAX, Math.max(CORROSION_MIN, value));
     }
 
-    /** 把比例值（盔甲减免等）钳到 [0,1]。注意：v1.2 起减免恒 < 1.0（配置校验拒绝任何 ≥1.0 的材质），\n     * 这里的 1.0 分支仅是内核防御网，不是可配置玩法。 */
+    /** 把比例值（盔甲减免等）钳到 [0,1]。NaN/Infinity 视为 0（bug hunt P1-5）。
+     * 注意：v1.2 起减免恒 < 1.0（配置校验拒绝任何 ≥1.0 的材质），
+     * 这里的 1.0 分支仅是内核防御网，不是可配置玩法。 */
     public static double clampUnit(double value) {
+        if (!Double.isFinite(value)) {
+            return 0.0;
+        }
         return Math.min(1.0, Math.max(0.0, value));
     }
 

@@ -451,9 +451,20 @@ class PluginConfigValidationTest {
     }
 
     @Test
-    @DisplayName("anti_dust 非法：HUD 标记为空拒绝")
+    @DisplayName("anti_dust 非法：HUD 标记为空拒绝（正确拼写）")
     void antiDustEmptyHudMarkRejected() {
-        assertRejected(BASE.replace("hud-immume-mark: \"◆抗尘\"", "hud-immume-mark: \"\""),
+        // bug hunt P2-7：仓库配置已改用正确拼写 hud-immune-mark，
+        // 因此这里的替换锚点与期望的报错键名都必须是正确拼写。
+        assertRejected(BASE.replace("hud-immune-mark: \"◆抗尘\"", "hud-immune-mark: \"\""),
+                "anti_dust.hud-immune-mark");
+    }
+
+    @Test
+    @DisplayName("anti_dust 非法：HUD 标记为空拒绝（历史拼写 hud-immume-mark 仍被校验）")
+    void antiDustEmptyLegacyHudMarkRejected() {
+        // 向后兼容路径同样要有校验，否则老配置写空值会静默退化
+        assertRejected(BASE
+                        .replace("hud-immune-mark: \"◆抗尘\"", "hud-immume-mark: \"\""),
                 "anti_dust.hud-immume-mark");
     }
 

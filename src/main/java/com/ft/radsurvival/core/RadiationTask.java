@@ -36,11 +36,14 @@ import com.ft.radsurvival.config.PluginConfig;
  * → ArmorCalculator 取减免（§1.4）→ {@link CorrosionMeter#settle}（elapsed=interval/20 秒，
  * 露天累积按 {@link RadiationMath#effectiveAccumRatePerSec} 的 M2a 内核口径 =
  * dayAccum×timeFactor×(armorAffectsAccum? 1−red : 1)、遮蔽/豁免维度按 regen 恢复）
- * → 腐蚀倍率用<b>步进后的新值</b> → 减免 ≥ 1.0 完全免疫短路（不掉血、不发事件、不播任何反馈，§1.3；
- * 注：腐蚀步进已在前面完成，默认 armor-affects-accum=true 下免疫套累积速率恰为 0，
- * 与 M4「全下界合金零伤害零累积」一致）→
- * 否则 finalDamage = {@link RadiationMath#finalDamage}，&gt;0 时经 {@link DamageApplier}
- * 广播 {@code RadiationExposureEvent} 并真实掉血。</p>
+ * → 腐蚀倍率用<b>步进后的新值</b> → finalDamage = {@link RadiationMath#finalDamage}，
+ * &gt;0 时经 {@link DamageApplier} 广播 {@code RadiationExposureEvent} 并真实掉血。</p>
+ *
+ * <p><b>不存在「减免 ≥ 1.0 → 完全免疫」的短路分支</b>（v1.2 起）：配置校验拒绝任何
+ * ≥ 1.0 的材质系数，{@link RadiationMath#clampUnit} 也把比例钳在 [0,1]，因此哪怕穿满
+ * 最强材质（下界合金满配 72%）仍会吃到 {@code armor.min-damage-fraction} 的保底伤害。
+ * 唯一的真免疫来源是抗尘埃药窗口（{@code DustImmunity}），它在露天判定阶段就把本轮回落到
+ * 「零伤害、零累积」。旧注释描述的「全下界合金零伤害零累积」是 v1.1 语义，已不成立。</p>
  *
  * <p>玩家状态 {@code Map<UUID, PlayerRadState>} 由本类持有；生命周期由
  * listener/PlayerSessionListener 经 {@link #registerPlayer}/{@link #unregisterPlayer} 维护

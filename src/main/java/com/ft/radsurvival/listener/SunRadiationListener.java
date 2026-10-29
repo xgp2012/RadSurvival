@@ -76,6 +76,12 @@ public final class SunRadiationListener implements Listener {
 
     /** 登记「本插件刚造成一笔 SUN 伤害」（在 {@code damage()} 之后同步调用）。 */
     public void recordSunDamage(Player player, double amount) {
+        // bug hunt P1-2：reload 后本实例已不是当前门控监听，不得再往自己的 marks 表里记。
+        // 旧实例注册在 HandlerList 里无法按实例注销，只能靠这个守卫让它彻底沉默；
+        // 否则 marks 只增不减（quit 清理走的是**新**实例），UUID 复用时会误判他人 GENERIC 伤害。
+        if (plugin.sunRadiation() != this) {
+            return;
+        }
         marks.put(player.getUniqueId(), new SunMark(clock.getAsLong(), amount));
     }
 
@@ -144,6 +150,11 @@ public final class SunRadiationListener implements Listener {
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onEntityDamage(EntityDamageEvent event) {
         try {
+            // bug hunt P1-2：reload 后旧实例仍在 HandlerList 里，但它既不认识新的 SUN 标记，
+            // 也不该再改写伤害（否则同一笔外部伤害会被新旧两个实例各还原一次原版减免）。
+            if (plugin.sunRadiation() != this) {
+                return;
+            }
             if (!(event.getEntity() instanceof Player player)) {
                 return;
             }

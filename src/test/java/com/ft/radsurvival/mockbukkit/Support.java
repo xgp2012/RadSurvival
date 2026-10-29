@@ -2,6 +2,7 @@ package com.ft.radsurvival.mockbukkit;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -146,5 +147,72 @@ final class Support {
                 org.bukkit.Material.getMaterial(material + "_LEGGINGS")));
         player.getInventory().setBoots(new org.bukkit.inventory.ItemStack(
                 org.bukkit.Material.getMaterial(material + "_BOOTS")));
+    }
+
+    /**
+     * 直接加载一段 YAML 文本（写临时文件 → {@code PluginConfig.loadFromFile}）。
+     *
+     * <p>与 {@link #loadConfigWith} 的分工：本方法不猜结构，调用方用自己的
+     * {@link #configYamlWith} 精确构造变体，适合「整行替换/追加」这类场景。</p>
+     */
+    static com.ft.radsurvival.config.PluginConfig.LoadResult loadConfigYaml(String yaml) {
+        Path file;
+        try {
+            file = Files.createTempFile("radsurvival-cfg", ".yml");
+            Files.writeString(file, yaml, StandardCharsets.UTF_8);
+            file.toFile().deleteOnExit();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return com.ft.radsurvival.config.PluginConfig.loadFromFile(file);
+    }
+
+    /**
+     * 在仓库默认配置基础上，把 {@code section} 段内的 {@code key} 覆写为 {@code value} 后加载。
+     *
+     * <p>用于验证「同一语义的不同键名」这类配置契约（如 anti_dust 的两种拼写）。
+     * 实现为逐行扫描：跟踪当前处于哪个顶格段，命中段内同名键则整行替换；
+     * 段内不存在该键时插到段首。这样不会破坏缩进与注释结构。</p>
+     *
+     * @param section 一级段名（如 {@code anti_dust}）
+     * @param key     段内键名
+     * @param value   YAML 字面量（字符串请自带引号）
+     */
+    static com.ft.radsurvival.config.PluginConfig.LoadResult loadConfigWith(
+            String section, String key, String value) {
+        String yaml = repoConfigYaml();
+        String[] lines = yaml.split("\r?\n", -1);
+        List<String> out = new ArrayList<>(lines.length + 1);
+        String current = "";
+        int insertAt = -1;
+        boolean replaced = false;
+        for (String line : lines) {
+            // 顶格且形如 `name:` → 切换当前段
+            if (!line.isEmpty() && !line.startsWith(" ") && !line.startsWith("#")
+                    && line.stripTrailing().endsWith(":")) {
+                current = line.substring(0, line.indexOf(':')).trim();
+                if (current.equals(section) && insertAt < 0) {
+                    insertAt = out.size() + 1; // 段头下一行
+                }
+                out.add(line);
+                continue;
+            }
+            if (current.equals(section) && !replaced) {
+                String trimmed = line.stripLeading();
+                if (trimmed.startsWith(key + ":")) {
+                    out.add("  " + key + ": " + value);
+                    replaced = true;
+                    continue;
+                }
+            }
+            out.add(line);
+        }
+        if (!replaced) {
+            if (insertAt < 0) {
+                throw new IllegalStateException("配置段不存在: " + section);
+            }
+            out.add(insertAt, "  " + key + ": " + value);
+        }
+        return loadConfigYaml(String.join("\n", out));
     }
 }

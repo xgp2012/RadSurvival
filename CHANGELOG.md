@@ -10,6 +10,87 @@
 
 ## [未发布]
 
+### v1.3.1 — 全量缺陷排查修复（待发版）
+
+> 由一次覆盖 `src/main/java` 全部 33 个类的系统性排查驱动，共修复 17 项缺陷
+> （2 项 P0 / 8 项 P1 / 7 项 P2）。完整触发条件、影响与实证见 [BUGHUNT.md](BUGHUNT.md)。
+> 每项修复都以「复现用例先变红、改写断言后变绿」的方式验证。
+> 测试总数 268 → **310**，全绿。
+
+#### 严重（影响数据正确性 / 可被反复利用）
+
+1. **背包满时用药水掉落、却不扣作物 —— 可无限刷抗尘埃药**
+   旧逻辑在 `addItem` 溢出时把药水 `dropItemNaturally` 到地上，随后 `return 0` 跳过了扣作物。
+   每执行一次多一瓶药、作物一个不少，且提示文案还把漏洞写成特性「（作物未消耗）」。
+   现改为先精确预判背包容量（能并进同类未满堆的算容量、空位按最大堆叠算）：**放不下就整单失败**
+   ——不产出、不掉落、不扣作物；放得下才交付，交付后**无条件**扣 1 个作物。
+   注意 `paper-api 1.21.11` 的 `Inventory` / `PlayerInventory` **没有** `hasSpaceFor`（已用 `javap` 核实），
+   故容量判断由插件自实现。
+   *既有测试 `fullInventoryDoesNotConsumeCrop` 曾把该漏洞断言为正确行为，已改写为 `fullInventoryConsumesNothing`。*
+
+2. **NaN / Infinity 可从配置注入，污染全场伤害与落盘数据**
+   `corrosion.stages.*` 之外的所有数值键共用 `toDouble`，而 `Double.isNaN` 参与的比较恒为 false，
+   于是 `.nan` 能**静默通过全部校验**；`.inf` 则会在格式化错误信息时抛
+   `NumberFormatException`，被兜底捕获后**误报成「YAML 解析失败」**，把服主引向错误方向。
+   现在入口一律拒绝非有限数，错误信息明确写「必须是有限数值」。
+
+#### 安全 / 行为契约
+
+3. **任意发射器/投掷器都被当成制药台**：写入约束此前只看容器类型、不看结构，等于把全服的
+   发射器变成「只收农作物」的容器。现在结构不成立（或结构暂时读不出）即完全退回原版行为。
+   `craft()` 仍允许在结构不完整时先把作物备好——两处口径已分别注释说明。
+4. **`/rad status <他人>` 泄露对方盔甲减免与预计伤害**：PVP 场景下这是免费的对手情报，
+   而该命令没有任何权限门槛。现在这三行仅管理员或本人可见。
+5. **`/rad force-check` 对所有人开放且无冷却**：它走的是**真实结算**（步进腐蚀 + 广播事件 +
+   真实掉血 + 写 PDC），玩家连按就能把结算节律从「每 tick-interval」变成「每次按键」。
+   现要求 `radsurvival.admin`（与 `corrosion set/add` 同级），普通玩家改用 `/rad status`（只读、零副作用）。
+6. **reload 后全场抗尘埃药免疫被静默清空**：`DustImmunity` 随服务容器重建，而免疫窗口只存在内存里。
+   已确认这是**设计上的内存态**，将其持久化会改变玩法语义，故本次仅登记、未改行为。
+7. **reload 后太阳伤害标记表无界增长**：门控监听在 reload 时新建，但新反馈层没拿到引用，
+   退服清理恒被空判跳过 → `marks` 只增不减，UUID 复用时可能把别人的普通伤害认成太阳伤害。
+   现在监听被字段化，reload 时重新注册并重新绑定，旧实例以「非当前实例」守卫彻底沉默。
+
+#### 校验缺口
+
+8. **`corrosion.stages.warn/danger` 读了却零校验**：`warn ≥ danger` 时 warn 档永不可达
+   （阶段播报直接跳级）、`danger > 100` 永不触发、`warn < 0` 一进服就播「危险」——全部静默。
+   现校验两者 ∈[0,100] 且 `warn < danger`。
+
+#### 显示 / 维护性
+
+9. 腐蚀条 BossBar 在死亡、跨维度、传送后会**永久消失**：客户端丢条但 `getPlayers()` 仍含该玩家，
+   旧代码的「不在列表才 add」永远不再补发。现改为每轮无条件 `addPlayer`（幂等）。
+10. BossBar 阶段配色与标题百分比不同源（44.7% 显示「45%」却是蓝色），现统一由显示百分比驱动。
+11. `shutdown()` 未调 `HandlerList.unregisterAll(this)`，每次 reload 都在 HandlerList 里多留一份失效实例；已补。
+    BossBar 清理改用 `removeAll()`，不再因玩家刚断线而漏清。
+12. 制药台去重改为「**同一方块 + 150ms**」并且判重提前到取消事件**之前**：
+    旧实现只看时间不看方块，换个铁砧点第二下会被取消却不合成，玩家感觉「点了没反应」。
+13. `/rad dust list|help` 会给不被消费的玩家名参数做补全；`levels` 为空时补全空手。均已修正。
+14. 命令行表格宽度把 `0x2E80–0xA4CF` 整段当全角，其中彝文等实为 1 列的码位会让整列对齐漂移。
+    区间收紧为真正的全角范围（`command` 包此前**没有任何单元测试**，本次补 13 条）。
+
+#### 配置
+
+15. **`anti_dust.hud-immume-mark` 拼写错误（双 m）**：正确拼写 `hud-immune-mark` 会被静默忽略。
+    现在**两种拼写都接受**、正确拼写优先，两者并存时给出明确提示；`config.yml` 已改用正确拼写。
+    老配置无需修改。
+
+#### 测试
+
+- 新增 42 条用例：`BugHuntRegressionTest`(9)、`ConfigNonFiniteNumberTest`(5)、
+  `NonFiniteNumberGuardTest`(4)、`StageThresholdValidationTest`(6)、
+  `SunMarkReloadLeakMockBukkitTest`(3)、`CommandOutputWidthTest`(13)、
+  `PluginConfigValidationTest`(+1 历史拼写兼容)、`AntiDustChainMockBukkitTest`(+1)。
+- `AntiDustChainMockBukkitTest` 中把漏洞断言为正确行为的两条用例已改写为期望行为。
+- 全量：**310 tests, 0 failures, 0 errors, 0 skipped**。
+
+#### 文档
+
+- `RadiationTask` 类注释里「减免 ≥ 1.0 完全免疫短路」「全下界合金零伤害零累积」是 v1.1 语义，
+  与 v1.2 起「减免恒 < 1.0、恒有保底伤害、唯一真免疫来自抗尘埃药」不符，已改写。
+
+---
+
 ### v1.3.0 — 露天判定稳定性修复（待发版）
 
 > 只动**判定精度与开销**，不动任何玩法数值：白天/夜晚系数、腐蚀、护甲、抗尘埃药口径一律未变。

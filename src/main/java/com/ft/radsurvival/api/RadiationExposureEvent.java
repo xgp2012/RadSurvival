@@ -152,9 +152,17 @@ public final class RadiationExposureEvent extends Event implements Cancellable, 
         return finalDamage;
     }
 
-    /** 覆写最终伤害（§4.8「可改伤害」入口）。允许设为 0（等效免伤）；负值按 0 处理（不产生回血）。 */
+    /**
+     * 覆写最终伤害（§4.8「可改伤害」入口）。允许设为 0（等效免伤）；负值按 0 处理（不产生回血）。
+     *
+     * <p><b>bug hunt P1-6 修复</b>：本方法的 javadoc 长期写着「负值按 0 处理」，但实现只是原样
+     * 赋值——而下游 {@code DamageApplier} 的守卫是 {@code amount <= 0.0}，这条判断对
+     * {@code NaN} 恒为 false，于是 NaN 会穿过守卫进入 {@code damage()}（Paper 视作 0，伤害
+     * 静默消失）与受击反馈挂点，污染死亡文案与 {@code /rad status}；{@code Infinity} 则直接秒杀。
+     * 现在在写入点就把口径落实：非有限值一律按 0，负值钳到 0。</p>
+     */
     public void setFinalDamage(double finalDamage) {
-        this.finalDamage = finalDamage;
+        this.finalDamage = Double.isFinite(finalDamage) ? Math.max(0.0, finalDamage) : 0.0;
     }
 
     // ---------------------------------------------------------------- Cancellable

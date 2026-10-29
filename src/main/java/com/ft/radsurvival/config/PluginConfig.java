@@ -45,6 +45,9 @@ public final class PluginConfig {
     /** 伤害结算间隔下限：原版无敌帧 20 tick（§1.3 / §6，PluginConfig 强制校验）。 */
     public static final int MIN_TICK_INTERVAL = 20;
 
+    /** 腐蚀值百分比上限（各处校验共用，避免魔法数散落）。 */
+    private static final double CORROSION_MAX_PERCENT = 100.0;
+
     /** 材质系数允许的键（§1.4）。 */
     public static final Set<String> ALLOWED_MATERIALS = Set.of(
             "LEATHER", "GOLD", "CHAINMAIL", "IRON", "DIAMOND", "NETHERITE");
@@ -509,6 +512,20 @@ public final class PluginConfig {
         }
         double stageWarn = requireDouble(c.node("stages", "warn"), 50.0, "corrosion.stages.warn", errors);
         double stageDanger = requireDouble(c.node("stages", "danger"), 75.0, "corrosion.stages.danger", errors);
+        // bug hunt P1-7：这两个键此前是「读了但一次都没校验」的漏网之鱼。
+        // 后果全部是静默的：warn ≥ danger 时 warn 档永远不可达（播报直接跳级）；
+        // danger > 100 时永远到不了 danger；阈值 < 0 时玩家一进服就播「危险」。
+        // 都是合法数字、不报错、日志里也看不出来，只能靠这里拦住。
+        if (stageWarn < 0.0 || stageWarn > CORROSION_MAX_PERCENT) {
+            errors.add("corrosion.stages.warn=" + fmt(stageWarn) + " 非法：必须 ∈ [0,100]（腐蚀条是 0~100%）");
+        }
+        if (stageDanger < 0.0 || stageDanger > CORROSION_MAX_PERCENT) {
+            errors.add("corrosion.stages.danger=" + fmt(stageDanger) + " 非法：必须 ∈ [0,100]（腐蚀条是 0~100%）");
+        }
+        if (stageWarn >= stageDanger) {
+            errors.add("corrosion.stages.warn=" + fmt(stageWarn) + " 必须 < corrosion.stages.danger="
+                    + fmt(stageDanger) + "：否则 warn 档永远不可达（阶段播报会直接跳级）");
+        }
         CorrosionConfig corrosion = new CorrosionConfig(corrEnabled, dayAccum, regen, armorAffectsAccum,
                 maxMultiplier, curve, resetOnDeath, decayOnDeath, stageWarn, stageDanger);
 
@@ -654,9 +671,30 @@ public final class PluginConfig {
                 cures.add(name);
             }
         }
-        String mark = requireString(node.node("hud-immume-mark"), "◆抗尘", "anti_dust.hud-immume-mark", errors);
+        // bug hunt P2-7（配置键拼写）：历史版本把键名写成了 hud-immume-mark（双 m），
+        // 而这个名字已经进了对外契约（config.yml、文档、老存档）。直接改名会让所有
+        // 已存在的配置静默回退到默认值，所以现在**两种拼写都接受**：
+        // 正确拼写 hud-immune-mark 优先，旧的拼错写法继续兼容。
+        // 只写正确拼写的服主从此不再被静默忽略（修复前那是纯粹的静默陷阱）。
+        ConfigurationNode correctNode = node.node("hud-immune-mark");
+        ConfigurationNode legacyNode = node.node("hud-immume-mark");
+        ConfigurationNode markNode;
+        String markLabel;
+        if (!correctNode.virtual()) {
+            markNode = correctNode;
+            markLabel = "anti_dust.hud-immune-mark";
+            if (!legacyNode.virtual()) {
+                // 两个都写：以正确拼写为准，但提示一句，避免服主改了旧的发现没生效
+                errors.add("anti_dust 同时存在 hud-immune-mark 与 hud-immume-mark（后者为历史拼写错误）："
+                        + "请只保留 hud-immune-mark，当前已按 hud-immune-mark 生效");
+            }
+        } else {
+            markNode = legacyNode;
+            markLabel = "anti_dust.hud-immume-mark";
+        }
+        String mark = requireString(markNode, "◆抗尘", markLabel, errors);
         if (mark.isBlank()) {
-            errors.add("anti_dust.hud-immume-mark 不能为空：免疫期间 HUD 需要一段可辨识的抗性文本");
+            errors.add(markLabel + " 不能为空：免疫期间 HUD 需要一段可辨识的抗性文本");
         }
 
         List<DustLevel> levels = new ArrayList<>();
@@ -858,6 +896,24 @@ public final class PluginConfig {
     }
 
     private static Double toDouble(Object raw, String label, List<String> errors) {
+        Double value = toDoubleRaw(raw, label, errors);
+        if (value == null) {
+            return null;
+        }
+        // —— bug hunt P0-2：NaN / ±Infinity 必须在入口拦下。
+        //   SnakeYAML 把 `.nan` / `.inf` / `-.inf` 解析成对应的 double 特殊值，
+        //   它们随后会让所有 `<`/`>` 比较恒为 false（.nan）而**静默通过全部校验**，
+        //   或者触发越界分支后在 fmt() 里抛 NumberFormatException 被兜底 catch
+        //   误报成「YAML 解析失败」。两者都会让服主查错方向。
+        if (!Double.isFinite(value)) {
+            errors.add(label + "：必须是有限数值（不支持 .nan / .inf / -.inf），实际为 " + raw);
+            return null;
+        }
+        return value;
+    }
+
+    /** 原始数值解析（不做有限性校验；仅供 {@link #toDouble} 复用）。 */
+    private static Double toDoubleRaw(Object raw, String label, List<String> errors) {
         if (raw == null) {
             errors.add(label + "：期望数值，但未取到标量");
             return null;
@@ -927,8 +983,14 @@ public final class PluginConfig {
         return raw.toString().trim();
     }
 
-    /** 去掉多余小数尾零的可读数字格式（用于错误信息）。 */
+    /** 去掉多余小数尾零的可读数字格式（用于错误信息；非有限值原样输出，绝不抛异常）。 */
     private static String fmt(double v) {
+        if (!Double.isFinite(v)) {
+            // BigDecimal.valueOf(NaN/Infinity) 会抛 NumberFormatException，
+            // 而 fmt 的调用点全在「已经出错、正在拼错误信息」的分支里——
+            // 那里再抛异常会把真实的配置错误掩盖成 YAML 解析失败（bug hunt P0-2）。
+            return String.valueOf(v);
+        }
         return BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
     }
 }

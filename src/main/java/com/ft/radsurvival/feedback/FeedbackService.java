@@ -173,10 +173,11 @@ public final class FeedbackService implements Listener, Runnable, DamageApplier.
         }
         for (Map.Entry<UUID, BossBar> entry : bossbars.entrySet()) {
             try {
-                Player viewer = Bukkit.getPlayer(entry.getKey());
-                if (viewer != null) {
-                    entry.getValue().removePlayer(viewer);
-                }
+                // bug hunt P2-1：不能用 Bukkit.getPlayer(uuid) 做前置条件——
+                // reload 前刚断线的玩家此刻取不到 Player，旧实现就只 setVisible(false)、
+                // 不 removePlayer，条子会在客户端残留到重进为止。
+                // BossBar#removeAll() 不需要 Player 实例，是彻底清空的正确姿势。
+                entry.getValue().removeAll();
                 entry.getValue().setVisible(false);
             } catch (RuntimeException ex) {
                 recordError("BossBar 清理", ex);
@@ -192,6 +193,15 @@ public final class FeedbackService implements Listener, Runnable, DamageApplier.
                 recordError("ProtocolLib 增强摘除", ex);
             }
             enhancer = null;
+        }
+        // bug hunt P2-3：把本实例真正移出 HandlerList。
+        // 旧实现只依赖 plugin.feedback() != this 守卫「让它失效」，实例本身仍常驻
+        // HandlerList —— 每次 reload 都多一份失效对象。显式注销后，泄漏从
+        // 「靠守卫兜底」变成「实例真的离场」（守卫保留作双保险，onDisable 也有同类先例）。
+        try {
+            org.bukkit.event.HandlerList.unregisterAll(this);
+        } catch (RuntimeException ex) {
+            recordError("HandlerList 注销", ex);
         }
     }
 
@@ -253,25 +263,32 @@ public final class FeedbackService implements Listener, Runnable, DamageApplier.
             actionbarSends.incrementAndGet();
         }
         if (fb.bossbarCorrosion()) {
+            // bug hunt P2-2：阶段色必须按**显示口径**（取整后的百分位）来算，
+            // 否则 44.7% + 阈值 45 时标题写着「45%」、条子却是正常档的蓝色，
+            // 玩家看到的是自相矛盾的两条信息。CommandOutput 的命令行读数已是此口径。
+            int displayPct = HudRenderer.corrosionDisplayPercent(corrosion);
             int stage = com.ft.radsurvival.core.RadiationMath
-                    .stageOf(corrosion, cfg.corrosion().stageWarn(), cfg.corrosion().stageDanger());
+                    .stageOf(displayPct, cfg.corrosion().stageWarn(), cfg.corrosion().stageDanger());
             BossBar bar = bossbars.get(id);
             if (bar == null) {
                 bar = Bukkit.createBossBar(
                         HudRenderer.renderBossBarTitle(corrosion, cfg.corrosion().stageWarn(), cfg.corrosion().stageDanger()),
                         stageBarColor(stage), BarStyle.SOLID);
-                bar.setProgress(HudRenderer.corrosionDisplayPercent(corrosion) / 100.0);
+                bar.setProgress(displayPct / 100.0);
                 bar.setVisible(true);
                 bossbars.put(id, bar);
             } else {
                 bar.setTitle(HudRenderer.renderBossBarTitle(
                         corrosion, cfg.corrosion().stageWarn(), cfg.corrosion().stageDanger()));
                 bar.setColor(stageBarColor(stage));
-                bar.setProgress(HudRenderer.corrosionDisplayPercent(corrosion) / 100.0);
+                bar.setProgress(displayPct / 100.0);
             }
-            if (!bar.getPlayers().contains(player)) {
-                bar.addPlayer(player);
-            }
+            // bug hunt P1-8：无条件 addPlayer。
+            // 旧写法 `if (!bar.getPlayers().contains(player))` 有个致命盲点：死亡、跨维度、
+            // 传送会让**客户端**丢掉这条 BossBar，而 Bukkit 侧的 getPlayers() 仍包含该玩家，
+            // 于是永远不再补发 → 腐蚀条永久消失，直到 reload/重启。
+            // addPlayer 对同一玩家重复调用是幂等 no-op，开销可忽略。
+            bar.addPlayer(player);
             bossbarUpdates.incrementAndGet();
         }
     }

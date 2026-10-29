@@ -107,24 +107,48 @@ public final class DustCraftGui implements Listener {
      * 远小于人手连续两次右键的间隔（正常连点 ≥ 100ms 但不会落在同一 tick 的同一方块上，
      * 实测双击间隔通常 > 250ms），因此不会误伤真实连点。</p>
      */
-    private final Map<UUID, Long> craftGuard = new ConcurrentHashMap<>();
+    private final Map<UUID, String> craftGuard = new ConcurrentHashMap<>();
 
     /** 同一玩家的两次合成视为「同一次右键」的最大时间差（毫秒）。 */
-    private static final long CRAFT_DEBOUNCE_MS = 200L;
+    private static final long CRAFT_DEBOUNCE_MS = 150L;
 
     /**
      * 判断本次交互是否应当跳过（同一 tick 内的重复派发）。
      *
-     * @return true = 这是重复事件，应直接忽略
+     * <p><b>bug hunt P2-4 修复</b>：口径从「200ms 内都算重复」收紧为
+     * 「同一 tick 或 150ms 内，且<b>同一个铁砧</b>」。原实现只看时间、不看目标方块，
+     * 且调用点在 {@code setCancelled(true)} 之后——玩家对 A 铁砧右键后 150ms 内再点 B 铁砧，
+     * 事件会被取消而合成不发生，表现为「点了没反应」。现在：
+     * <ul>
+     *   <li>引入方块坐标：换了目标方块就不是重复（真实连点/换台操作不受影响）；</li>
+     *   <li>窗口取 {@link #CRAFT_DEBOUNCE_MS}，覆盖原版同 tick 的双手双派发，
+     *       又不会吞掉人手双击（原注释自己承认实测双击 &gt; 250ms 与 200ms 窗口过于接近）；</li>
+     *   <li>调用点已提前到 {@code setCancelled} 之前，重复事件不再被无谓地取消掉。</li>
+     * </ul>
+     *
+     * @param player 触发玩家
+     * @param anvil  本次点到的铁砧方块
+     * @return true = 这是重复事件，应直接忽略（且不应取消事件）
      */
-    private boolean isDuplicate(Player player) {
+    private boolean isDuplicate(Player player, Block anvil) {
         long now = System.currentTimeMillis();
-        Long last = craftGuard.get(player.getUniqueId());
-        if (last != null && now - last < CRAFT_DEBOUNCE_MS) {
-            return true;
+        String here = anvil.getX() + "," + anvil.getY() + "," + anvil.getZ();
+        String previous = craftGuard.put(player.getUniqueId(), now + "@" + here);
+        if (previous == null) {
+            return false;
         }
-        craftGuard.put(player.getUniqueId(), now);
-        return false;
+        int at = previous.indexOf('@');
+        if (at <= 0) {
+            return false; // 旧格式/脏数据：无从比对，按不重复处理
+        }
+        if (!here.equals(previous.substring(at + 1))) {
+            return false; // 换了方块 → 不是同一次右键
+        }
+        try {
+            return now - Long.parseLong(previous.substring(0, at)) < CRAFT_DEBOUNCE_MS;
+        } catch (NumberFormatException ex) {
+            return false;
+        }
     }
 
     // ------------------------------------------------------------ 触发：木棍右键铁砧
@@ -171,12 +195,14 @@ public final class DustCraftGui implements Listener {
             craft(player, core, clicked); // 会打出结构诊断（不消耗任何东西）
             return;
         }
-        // 真正会产出时才接管本次交互，避免原版再走一遍「使用物品」逻辑
-        event.setCancelled(true);
-        // 双手都持木棍时主/副手会各派发一次（已限主手，这里仍是双保险）
-        if (isDuplicate(player)) {
+        // bug hunt P2-4：判重必须发生在 setCancelled **之前**——
+        // 否则重复事件会被取消、合成却不发生，玩家看到「点了没反应」，
+        // 而且原版的「使用物品」逻辑也被无谓吞掉。
+        if (isDuplicate(player, clicked)) {
             return;
         }
+        // 真正会产出时才接管本次交互，避免原版再走一遍「使用物品」逻辑
+        event.setCancelled(true);
         craft(player, core, clicked);
     }
 
@@ -232,28 +258,36 @@ public final class DustCraftGui implements Listener {
             return 0;
         }
 
-        // —— 先尝试把药水放进背包，**成功了才扣作物**。
+        // —— 先确认「有空位」才动手：交付与支付必须原子成立（bug hunt P0-1）。
         //
-        //  旧实现是「先扣作物 → 再 addItem → 失败就把整组 center 写回去」，
-        //  这条路径有两个真实缺陷：
-        //   ① 写回的是**原始整组** stack，等于作物没扣，同时又掉了一瓶药水
-        //      → 背包满时可以无限刷药（作物永远不减）；
-        //   ② addItem 可能**部分成功**（例如药水最大堆叠 8，背包只有 3 个空位时会
-        //      塞进 3 个、把剩下的返回），旧代码仍把整瓶 potion 再 drop 一次 → 复制。
-        //  改成「先给后扣」后，失败路径压根不碰中心格，天然没有回滚问题。
+        //  历史两次都栽在同一处：
+        //   ① 初版「先扣作物 → 再 addItem → 失败把整组写回」：写回的是原始整组，
+        //      等于作物没扣又掉出一瓶 → 背包满时无限刷药；
+        //   ② 二次修正「先给后扣，溢出就丢地上并 return 0」：地上那一瓶**已经是产出**，
+        //      但 return 0 跳过了扣作物 → 刷药路径原样保留，只是换了个分支
+        //      （既有测试 fullInventoryDoesNotConsumeCrop 还把它断言成了正确行为）。
+        //
+        //  现在的口径很硬：**要么作物 −1 且药水到手，要么两者都不变**。
+        //  因此先精确预判「放不放得下」，放不下就整单失败、不产出任何东西；
+        //  放得下才 addItem，此时 addItem 必然全部收下（同 tick 内没有第三方抢位）。
         ItemStack potion = items.create(level, 1);
-        var overflow = player.getInventory().addItem(potion);
-        if (!overflow.isEmpty()) {
-            // 背包满：**不扣作物**，只把真正溢出的部分丢在脚下（不是整瓶）
-            for (ItemStack rest : overflow.values()) {
-                player.getWorld().dropItemNaturally(player.getLocation(), rest);
-            }
-            player.sendActionBar(note("§e背包已满§8 · §7药水掉在脚下（作物未消耗）"));
+        if (!hasRoomFor(player.getInventory(), potion)) {
+            // 整单失败：不产出、不扣作物（「失败不惩罚」的加工台语义）
+            player.sendActionBar(note("§c背包已满§8 · §7腾出一个空位后再来（作物未消耗）"));
             playFail(player);
             return 0;
         }
+        // addItem 在 hasSpaceFor 通过后必然全收；overflow 分支仅作防御性兜底，
+        // 一旦真的发生（第三方插件在同 tick 抢占），必须把药水如实落地——
+        // 因为此刻已经「交付」，下面的扣作物不能再被跳过。
+        var overflow = player.getInventory().addItem(potion);
+        boolean dropped = false;
+        for (ItemStack rest : overflow.values()) {
+            player.getWorld().dropItemNaturally(player.getLocation(), rest);
+            dropped = true;
+        }
 
-        // —— 药水已到手，这才扣除 1 个作物
+        // —— 交付已成立，无条件扣除 1 个作物（产出与支付同生共死）
         int remaining = center.getAmount() - 1;
         if (remaining > 0) {
             ItemStack leftover = center.clone();
@@ -263,7 +297,8 @@ public final class DustCraftGui implements Listener {
             inv.setItem(DustCraftStructure.CENTER_SLOT, null);
         }
 
-        player.sendActionBar(note("§a已制成 §f" + level.displayName()
+        player.sendActionBar(note((dropped ? "§e背包已满，药水落在脚下§8 · §7" : "§a已制成 §f")
+                + level.displayName()
                 + " §8· §7−" + trim(level.corrosionReduction()) + "% / "
                 + level.immuneSeconds() + "s"));
 
@@ -286,6 +321,47 @@ public final class DustCraftGui implements Listener {
             // 世界/区块已不可用：静默跳过特效（不影响已完成的合成）
         }
         return 1;
+    }
+
+    /**
+     * 背包能否<b>完整</b>收下这一叠物品（bug hunt P0-1 的判定内核）。
+     *
+     * <p>为什么不用现成的 {@code Inventory#hasSpaceFor}：1.21.11 的 paper-api 里
+     * {@code Inventory} 与 {@code PlayerInventory} <b>都没有</b>该方法（javap 核实，
+     * 只有 {@code addItem} / {@code firstEmpty}），所以这里自己算，口径与
+     * {@code addItem} 的落位规则一致：<b>能并进同类未满堆的算容量，空位按最大堆叠算</b>。</p>
+     *
+     * <p>纯函数、只读，不修改背包；{@code null}/AIR 槽位一律算空位。</p>
+     *
+     * @param inventory 目标背包（玩家主背包，调用方已确认非空）
+     * @param stack     要放入的物品（数量一般 1，但按通用实现写）
+     * @return 容量是否足够完整收下
+     */
+    static boolean hasRoomFor(Inventory inventory, ItemStack stack) {
+        if (inventory == null || stack == null || stack.getType() == Material.AIR) {
+            return true;
+        }
+        int maxStack = Math.max(1, stack.getMaxStackSize());
+        int remaining = stack.getAmount();
+        int freeSlots = 0;
+        for (ItemStack slot : inventory.getStorageContents()) {
+            if (slot == null || slot.getType() == Material.AIR) {
+                freeSlots++; // 空位稍后按最大堆叠计入
+                continue;
+            }
+            if (slot.isSimilar(stack)) {
+                int room = maxStack - slot.getAmount();
+                if (room > 0) {
+                    int take = Math.min(room, remaining);
+                    remaining -= take;
+                    if (remaining <= 0) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // 剩下的只能占空位：每空位最多 maxStack 个
+        return remaining <= freeSlots * maxStack;
     }
 
     // ------------------------------------------------------------ 容器使用约束
@@ -314,6 +390,12 @@ public final class DustCraftGui implements Listener {
         PluginConfig cfg = plugin.config();
         if (cfg == null || !cfg.antiDust().enabled()) {
             return; // 开关关闭：完全退回原版行为
+        }
+        // bug hunt P1-1：本方法只处理「写入方向」的拦截（下方每个取消点都对应一次写入）。
+        // 结构不成立（或读不出）时它不是制药台，立刻退回原版行为——否则全服发射器
+        // 都会被禁止放东西。取出方向本来就在后面按 incoming == null 放行。
+        if (!restrictable(core)) {
+            return;
         }
         int raw = event.getRawSlot();
 
@@ -405,6 +487,9 @@ public final class DustCraftGui implements Listener {
         if (cfg == null || !cfg.antiDust().enabled()) {
             return;
         }
+        if (!restrictable(core)) {
+            return; // bug hunt P1-1：拖拽必然是写入方向，非制药台直接退回原版行为
+        }
         boolean touchesCore = event.getRawSlots().stream().anyMatch(slot -> slot >= 0 && slot < SIZE);
         if (!touchesCore) {
             return;
@@ -437,11 +522,19 @@ public final class DustCraftGui implements Listener {
     public void onHopperMove(InventoryMoveItemEvent event) {
         // 「取走」方向同样要拦：否则漏斗能把中心格作物/外围展示物抽走，
         // 玩家会以为药水制作台「吃掉了东西」。只有玩家手动操作才允许取。
-        if (coreOf(event.getDestination()) == null && coreOf(event.getSource()) == null) {
+        Block dest = coreOf(event.getDestination());
+        Block source = coreOf(event.getSource());
+        if (dest == null && source == null) {
             return;
         }
         PluginConfig cfg = plugin.config();
         if (cfg == null || !cfg.antiDust().enabled()) {
+            return;
+        }
+        // bug hunt P1-1：两端都必须**各自**是成立的制药台才拦。
+        // 例如「漏斗 → 普通发射器」：dest 只是一个发射器，结构不成立，
+        // 不能因为它是 dispenser 类型就把玩家的漏斗物流掐断。
+        if (!restrictable(dest) && !restrictable(source)) {
             return;
         }
         event.setCancelled(true);
@@ -460,6 +553,17 @@ public final class DustCraftGui implements Listener {
      *
      * <p>只认 {@link Dispenser}/{@link Dropper} 的 BlockState 持有的 inventory——
      * 这样玩家自己背包里的同名 9 格界面不会被误判。</p>
+     *
+     * <p><b>刻意<b>不</b>在此校验结构完整性</b>（bug hunt P1-1 的修复边界）：本方法同时服务于
+     * 三类调用，它们的结构要求并不相同——</p>
+     * <ul>
+     *   <li>{@code craft()}：结构不完整也必须能放作物（{@link #openFor} 的注释明确承诺
+     *       「方便先把作物备好」），所以它只用「是不是核心容器」这一层；</li>
+     *   <li><b>写入约束</b>（禁止往里放非作物）：这才是真正需要结构成立的地方。
+     *       若对普通发射器也禁止，等于把全服每一台发射器都变成「只收农作物」的加工台，
+     *       玩家再也没法用它做红石元件或普通容器——所以写入方向另用
+     *       {@link #restrictable} 再筛一次。</li>
+     * </ul>
      */
     private Block coreOf(Inventory inventory) {
         if (inventory == null || inventory.getType() != InventoryType.DISPENSER) {
@@ -470,6 +574,28 @@ public final class DustCraftGui implements Listener {
             return null;
         }
         return holder instanceof org.bukkit.block.BlockState state ? state.getBlock() : null;
+    }
+
+    /**
+     * 是否应当对该容器的<b>写入</b>施加制药台约束（bug hunt P1-1）。
+     *
+     * <p>两种情形都放行（= 不应约束）：</p>
+     * <ol>
+     *   <li><b>结构未成立</b>：没有铁砧/原木环 → 它只是一台普通发射器，立刻退回原版行为；</li>
+     *   <li><b>结构暂时不可读</b>（区块卸载、世界不可用 → {@code inspect} 内部兜底返回不成立）：
+     *       同样放行。此处宁可放过一次非法写入，也不让一台正常的发射器在区块边界上
+     *       忽然「卡住不让放东西」——后者对服主的表现是「插件坏了一半」。</li>
+     * </ol>
+     */
+    private static boolean restrictable(Block core) {
+        if (core == null) {
+            return false;
+        }
+        try {
+            return DustCraftStructure.inspect(core).ok();
+        } catch (RuntimeException ex) {
+            return false; // 结构读不出来就不约束，绝不因此抛穿事件回调
+        }
     }
 
     /** 打开核心方块的原版 UI（结构不完整也允许，方便预放作物）。 */

@@ -76,6 +76,17 @@ public class RadSurvivalPlugin extends JavaPlugin {
     /** v1.2 抗尘埃药服用结算监听器（同上）。 */
     private volatile AntiDustListener antiDust;
 
+    /**
+     * 伤害通道门控监听（判定链路强化；每次 reload 新建）。
+     *
+     * <p><b>bug hunt P1-2 修复</b>：本实例此前是 onEnable 的局部变量、只在首次装配时
+     * `attachSunRadiationListener`，而 reload 新建的 {@code FeedbackService} 没有拿到引用
+     * （字段恒 null）→ 新反馈层的 quit 清理里 `forget(id)` 被空判跳过 → {@code marks}
+     * 只增不减。UUID 复用时旧标记可能把别人的 GENERIC 伤害认成太阳伤害。
+     * 现在保存为字段，并在 reload 的装配序列里重新绑定。</p>
+     */
+    private volatile SunRadiationListener sunRadiation;
+
     @Override
     public void onEnable() {
         // 首次运行：把 jar 内默认 config.yml 释放到插件数据文件夹
@@ -109,6 +120,7 @@ public class RadSurvivalPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new RadiationMarkListener(), this);
         // —— 判定链路强化：伤害通道门控（外部伤害还原原版防御，仅 SUN 通道走自定义模型）
         SunRadiationListener sunRadiation = new SunRadiationListener(this);
+        this.sunRadiation = sunRadiation;
         getServer().getPluginManager().registerEvents(sunRadiation, this);
         for (Player player : getServer().getOnlinePlayers()) {
             newServices.radiationTask().registerPlayer(player); // 覆盖「服务重建时已在服」玩家
@@ -272,6 +284,16 @@ public class RadSurvivalPlugin extends JavaPlugin {
     }
 
     /**
+     * 伤害通道门控监听（判定链路强化；reload 后指向新实例，旧实例自动失效）。
+     *
+     * <p>事件处理以 {@code plugin.sunRadiation() == this} 作陈旧实例守卫——与
+     * {@link #feedback()} 同一套机制，避免 reload 后旧实例继续往自己的 marks 表里记脏数据。</p>
+     */
+    public SunRadiationListener sunRadiation() {
+        return sunRadiation;
+    }
+
+    /**
      * 服务容器替换钩子（MockBukkit 集成测试注入假露天解析器/假伤害执行器的装配入口，
      * §5.2 口径；生产代码不调用）。旧容器只取消任务，不负责冲刷——调用方自理。
      */
@@ -328,6 +350,16 @@ public class RadSurvivalPlugin extends JavaPlugin {
         // 重建反馈层：新 config 开关 + 新容器阶段回调桥 + 新 DamageApplier 挂点
         FeedbackService newFeedback = new FeedbackService(this);
         this.feedback = newFeedback;
+
+        // bug hunt P1-2：门控监听在 reload 时新建（旧实例的 SUN 标记表是脏数据，
+        // 且它注册在 HandlerList 里无法按实例注销——旧实例靠 plugin.sunRadiation() != this
+        // 守卫失效，与 FeedbackService 同一套陈旧实例机制）。新实例必须注册进 Bukkit，
+        // 同时必须绑定给新反馈层，否则 quit 时不再清理 SUN 标记（marks 无界增长）。
+        SunRadiationListener sunRadiation = new SunRadiationListener(this);
+        this.sunRadiation = sunRadiation;
+        getServer().getPluginManager().registerEvents(sunRadiation, this);
+        newFeedback.attachSunRadiationListener(sunRadiation);
+
         // 新实例的 Bukkit 事件处理需再注册（旧实例残留的处理器由 plugin.feedback()!=this 守卫失效）
         getServer().getPluginManager().registerEvents(newFeedback, this);
         newFeedback.start();
