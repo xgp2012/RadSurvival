@@ -57,9 +57,7 @@ class BugHuntRegressionTest {
         Block core = world.getBlockAt(100, 64, 100);
         core.setType(coreType);
         core.getRelative(BlockFace.UP).setType(Material.ANVIL);
-        for (BlockFace face : DustCraftStructure.RING_FACES) {
-            core.getRelative(face).setType(Material.OAK_LOG);
-        }
+        core.getRelative(BlockFace.DOWN).setType(Material.IRON_BLOCK);
         return core;
     }
 
@@ -103,9 +101,9 @@ class BugHuntRegressionTest {
     class NonStructureDispenserIsHijacked {
 
         @Test
-        @DisplayName("完全没有铁砧与原木环的裸发射器：UI 照样被「只收聚合物」规则接管")
+        @DisplayName("完全没有铁砧与铁块底座的裸发射器：UI 照样被「只收聚合物」规则接管")
         void bareDispenserContainerIsStillRestricted() {
-            // 随便找个空地放一台孤立发射器（没有铁砧、没有原木环）
+            // 随便找个空地放一台孤立发射器（上方无铁砧、下方无铁块）
             Block bare = world.getBlockAt(300, 64, 300);
             bare.setType(Material.DISPENSER);
             assertThat(DustCraftStructure.inspect(bare).ok())

@@ -372,7 +372,7 @@ v1.1 基线 188 条 → v1.2 **265 条**（+67）。新增四个测试类共 43 
 ### J.2 实机启动
 
 ```
-[RadSurvival] 抗尘埃药 · 4 个档位（refined/strong/improved/crude）· 冷却 20s · 结构 = 发射器 + 上方铁砧 + 一圈原木，木棍右键铁砧出品
+[RadSurvival] 抗尘埃药 · 4 个档位（refined/strong/improved/crude）· 冷却 20s · 结构 = 铁砧 + 发射器 + 铁块（竖列三格），木棍右键铁砧出品
 [RadSurvival] 已启用 · tick=20 base=1 night×0.5 worlds=[world] dim=[NORMAL] 腐蚀=on max×2 async=on armor≤72%
 [RadSurvival] 反馈层 · HUD=actionbar 粒子=WHITE_SMOKE 音效=on 死亡文案=on 红闪抑制=off（纯 Paper 原生）
 [RadSurvival] 接线 · 监听器 7 个（会话/标记/伤害门控/反馈/死亡文案/抗尘埃药），在线玩家 0 名已预填，命令 /rad help 查看用法。
@@ -402,10 +402,12 @@ v1.1 基线 188 条 → v1.2 **265 条**（+67）。新增四个测试类共 43 
 |---|---|---|
 | 核心方块 | `setblock 100 0 100 minecraft:dispenser` | `Changed the block at 100, 0, 100` |
 | 正上方铁砧 | `execute if block 100 1 100 minecraft:anvil run say anvil-ok` | 服务器日志 `[Rcon] anvil-ok` |
-| 8 邻为原木 | `execute if block 101 0 100 #minecraft:logs run say ring-ok` | 服务器日志 `[Rcon] ring-ok` |
+| 正下方铁块 | `execute if block 100 -1 100 minecraft:iron_block run say base-ok` | 服务器日志 `[Rcon] base-ok` |
 | 中心格作物 | `data get block 100 0 100 Items` | `[{Slot: 4b, id: "minecraft:golden_carrot", count: 1}]` |
 
-8 个邻居分别放了橡木/白桦/云杉/丛林/金合欢/深色橡木/红树/樱花——**混树种成立**。
+> **注**：本节记录的是 v1.2 当时的验收（核心 + 上方铁砧 + 同层 8 邻原木）。
+> 结构后来改为「铁砧 → 发射器 → 铁块」竖列三格，8 邻原木不再是要求；
+> 上表的「正下方铁块」行已按新口径更新，其余行（铁砧/核心/中心格）仍然适用。
 
 ### J.5 未能实机验证的部分（需真实客户端）
 

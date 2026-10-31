@@ -264,7 +264,7 @@ public class RadSurvivalPlugin extends JavaPlugin {
                 + cfg.antiDust().levels().stream().map(PluginConfig.DustLevel::id)
                         .collect(java.util.stream.Collectors.joining("/"))
                 + "）· 冷却 " + cfg.antiDust().cooldownSeconds() + "s · "
-                + "结构 = 发射器 + 上方铁砧 + 一圈原木，木棍右键铁砧出品");
+                + "结构 = 铁砧 + 发射器 + 铁块（竖列三格），木棍右键铁砧出品");
     }
 
     /** 把抗尘埃药的两个监听器从 HandlerList 摘掉（关闭开关时调用，可重复调用）。 */

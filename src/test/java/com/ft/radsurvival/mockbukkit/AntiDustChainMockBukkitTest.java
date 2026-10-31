@@ -54,14 +54,12 @@ class AntiDustChainMockBukkitTest {
         MockBukkit.unmock();
     }
 
-    /** 在 (100, 64, 100) 处按规则搭一套完整结构，返回核心方块。 */
+    /** 在 (100, 64, 100) 处按规则搭一套完整结构（竖列三格），返回核心方块。 */
     private Block buildStructure(Material coreType) {
         Block core = world.getBlockAt(100, 64, 100);
         core.setType(coreType);
         core.getRelative(BlockFace.UP).setType(Material.ANVIL);
-        for (BlockFace face : DustCraftStructure.RING_FACES) {
-            core.getRelative(face).setType(Material.OAK_LOG);
-        }
+        core.getRelative(BlockFace.DOWN).setType(Material.IRON_BLOCK);
         return core;
     }
 
@@ -85,24 +83,35 @@ class AntiDustChainMockBukkitTest {
     // -------------------------------------------------------------- 结构识别
 
     @Test
-    @DisplayName("完整结构被识别（发射器与投掷器均可），缺铁砧/缺原木被拒")
+    @DisplayName("完整结构被识别（发射器与投掷器均可），缺上方铁砧/缺下方铁块被拒")
     void structureRecognition() {
         Block core = buildStructure(Material.DISPENSER);
         assertThat(DustCraftStructure.inspect(core).ok()).isTrue();
 
-        // 拆掉铁砧 → 不成立
+        // 拆掉上方铁砧 → 不成立
         Block anvil = core.getRelative(BlockFace.UP);
         anvil.setType(Material.AIR);
         assertThat(DustCraftStructure.inspect(core).ok()).isFalse();
         anvil.setType(Material.ANVIL);
+        assertThat(DustCraftStructure.inspect(core).ok()).isTrue();
 
-        // 拆掉东侧原木 → 不成立，且诊断点名 EAST
+        // 拆掉下方铁块 → 不成立，且诊断点名「正下方必须是铁块」
+        Block base = core.getRelative(BlockFace.DOWN);
+        base.setType(Material.AIR);
+        DustCraftStructure.Result missingBase = DustCraftStructure.inspect(core);
+        assertThat(missingBase.ok()).isFalse();
+        assertThat(missingBase.summary()).contains("正下方必须是铁块").contains("AIR");
+        // 其它方块也不算底座
+        base.setType(Material.STONE);
+        assertThat(DustCraftStructure.inspect(core).ok()).isFalse();
+        base.setType(Material.IRON_BLOCK);
+        assertThat(DustCraftStructure.inspect(core).ok()).isTrue();
+
+        // 周围一圈不再是要求：拆掉东侧原木照样成立（旧版这里会失败）
         Block east = core.getRelative(BlockFace.EAST);
+        east.setType(Material.OAK_LOG);
+        assertThat(DustCraftStructure.inspect(core).ok()).isTrue();
         east.setType(Material.AIR);
-        DustCraftStructure.Result missingLog = DustCraftStructure.inspect(core);
-        assertThat(missingLog.ok()).isFalse();
-        assertThat(missingLog.summary()).contains("EAST");
-        east.setType(Material.BIRCH_LOG); // 换树种同样算
         assertThat(DustCraftStructure.inspect(core).ok()).isTrue();
 
         // 投掷器也认
@@ -286,10 +295,8 @@ class AntiDustChainMockBukkitTest {
     void incompleteStructureDoesNotCancel() {
         Block core = buildStructure(Material.DISPENSER);
         putCenter(core, Material.WHEAT, 3);
-        core.getRelative(BlockFace.UP).setType(Material.AIR); // 拆铁砧
-        // 铁砧没了就没有「铁砧」可点，这里退一步：保留铁砧但拆一朵原木
-        core.getRelative(BlockFace.UP).setType(Material.ANVIL);
-        core.getRelative(BlockFace.EAST).setType(Material.AIR);
+        // 铁砧还在（否则没有「铁砧」可点），拆掉下方铁块让结构不成立
+        core.getRelative(BlockFace.DOWN).setType(Material.AIR);
 
         player.getInventory().setItemInMainHand(new ItemStack(Material.STICK, 1));
         var event = new org.bukkit.event.player.PlayerInteractEvent(player,

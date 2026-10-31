@@ -591,7 +591,7 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
                 for (String line : DustCraftGui.structureHelp()) {
                     sender.sendMessage("  §7· §f" + line);
                 }
-                sender.sendMessage("  §8核心方块也接受投掷器；铁砧可用损坏/上蜡变体");
+                sender.sendMessage("  §8核心方块也接受投掷器；铁砧可用损坏/上蜡变体；下方必须是铁块");
             }
             case "give" -> giveDust(sender, cfg, args);
             case "list" -> listDust(sender, cfg);

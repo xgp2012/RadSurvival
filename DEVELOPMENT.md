@@ -75,7 +75,7 @@ com.ft.radsurvival
 │   └── RadiationServices  七单例容器（reload 时整体重建）
 ├── item/                  ★ 抗尘埃药（v1.2）
 │   ├── DustItemFactory    物品构建 + PDC 档位标识 + 档位反查
-│   ├── DustCraftStructure 多方块结构判定（发射器 + 上方铁砧 + 8 邻原木）
+│   ├── DustCraftStructure 多方块结构判定（铁砧 + 发射器 + 铁块，竖列三格）
 │   └── DustCraftGui       ★ 合成界面与触发（木棍右键铁砧 / 容器使用约束）
 ├── feedback/              表现层
 │   ├── FeedbackService     HUD 双条 / 阶段播报 / 粒子音效 / BossBar（兼作受击监听器）
@@ -564,8 +564,8 @@ v1.3 起做了一轮优化（序号统计防呆、门禁加强、发布幂等、
 
 | 坑 | 事实与结论 |
 |---|---|
-| **这不是配方，是多方块结构** | 用户明确否掉了「数据包 JSON 配方」和「工作台」。`DustCraftStructure` 判的是**世界里真实方块**：核心（发射器/投掷器）+ 正上方铁砧 + 同层 8 邻原木。别改回 `RecipeChoice` 思路 |
-| **「9 格外围一圈中间农作物」指的是容器 UI，不是世界方块** | 8 个原木是世界结构；GUI 里那 9 格是发射器自己的 `Inventory`，外围 8 格**只出不进**（放入被取消，取出放行），中心索引 `4` 才是作物位。别写成「只读」——「只读」会让人以为放进去还能拿回来 |
+| **这不是配方，是多方块结构** | 用户明确否掉了「数据包 JSON 配方」和「工作台」。`DustCraftStructure` 判的是**世界里真实方块**。当前口径（本版起）：竖列三格 = 最上铁砧 + 核心（发射器/投掷器）+ 最下铁块；v1.2 的「同层 8 邻原木」已被用户要求移除，`RING_FACES` 随之删除。别改回 `RecipeChoice` 思路 |
+| **「9 格外围一圈中间农作物」指的是容器 UI，不是世界方块** | 世界结构从来没有「格子」概念；GUI 里那 9 格是发射器自己的 `Inventory`，外围 8 格**只出不进**（放入被取消，取出放行），中心索引 `4` 才是作物位。别写成「只读」——「只读」会让人以为放进去还能拿回来 |
 | **`block.getState()` 返回快照** | 对它 `getInventory().setItem(...)` 再 `update()` 在本环境下不可靠；且「读中心格 → 写回剩余数量」若分两次拿快照会互相覆盖。统一用 `BlockInventoryHolder#getInventory()`（封装成 `DustCraftStructure.inventoryOf`） |
 | **`Tag.ANVIL` / `Tag.LOGS` 需要 Bukkit 注册表** | 纯 JUnit 下静态初始化直接抛 `ExceptionInInitializerError`。用 Tag 的判定只能放进 `mockbukkit/` 测（`DustCraftStructureMockBukkitTest`） |
 | **`org.bukkit.Tag` 的常量名** | 是 `Tag.LOGS`，不是 `Tag.ITEMS_LOGS`（后者不存在）。`Material` 是普通 enum 且实现 `Keyed`，但**不是** `ItemType`，需要时用 `material.asItemType()` |

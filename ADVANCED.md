@@ -151,9 +151,9 @@ v1.2 新增的四个测试类：
 | 类 | 条数 | 钉住什么 |
 |---|---|---|
 | `core/DustImmunityTest` | 8 | 免疫窗口边界（左开右闭）、重复服用取较长、clear 语义、惰性清理 |
-| `mockbukkit/DustCraftStructureMockBukkitTest` | 11 | 结构判定、Tag（铁砧/原木）、槽位映射、诊断信息 |
+| `mockbukkit/DustCraftStructureMockBukkitTest` | 12 | 结构判定（铁砧/铁块/发射器）、Tag、槽位映射、诊断信息 |
 | `mockbukkit/DustItemFactoryMockBukkitTest` | 8 | PDC 往返、`CONSUMABLE` 存在且 `consumeEffects` 为空、堆叠 8、档位失效 |
-| `mockbukkit/AntiDustChainMockBukkitTest` | 16 | **端到端**：搭真方块结构 → 放作物 → 木棍敲铁砧 → 产出 → 服用 → 免疫生效 → 冷却拦截 |
+| `mockbukkit/AntiDustChainMockBukkitTest` | 24 | **端到端**：搭真方块结构（三格竖列）→ 放作物 → 木棍敲铁砧 → 产出 → 服用 → 免疫生效 → 冷却拦截 |
 
 ```powershell
 mvn -B test -Dtest=RadCommandMockBukkitTest    # 单类
@@ -228,9 +228,9 @@ mvn -B test -Dtest=A,B                         # 多类用逗号（不能用 +�
 
 ### 3.4 `anti_dust` — 抗尘埃药（v1.2 新增）
 
-制药台是**多方块结构**，不是合成表：发射器/投掷器为核心方块，正上方压铁砧，
-同层 8 邻放满原木；作物放进核心方块 UI 的**中心格（索引 4）**，
-手持木棍右键铁砧完成合成（木棍不消耗）。
+制药台是**多方块结构**，不是合成表：竖着叠三格 —— 最上面铁砧、中间发射器/投掷器、最下面铁块；
+作物放进核心方块 UI 的**中心格（索引 4）**，手持木棍右键铁砧完成合成（木棍不消耗）。
+四个水平方向放什么方块都不参与判定（旧版要求的「同层 8 邻原木」已移除）。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -584,7 +584,7 @@ tick-interval（≥20 全局任务）
 | 配置改了没生效 | 先 `/rad reload --dry-run` 只校验不应用，确认合法后再 `/rad reload` |
 | 玩家想免除辐射 | 给 `radsurvival.exempt` 权限节点 |
 | 想看装配细节 | `/rad status`（控制台无参出配置摘要）；启动日志 3 行摘要与之同源 |
-| 制药台敲铁砧没反应 | `/rad dust help` 对照三条：铁砧在**正上方一格**、8 邻全是**原木**（木板不算）、中心格有**农作物**。缺任一条都不产出，但不会扣物品 |
+| 制药台敲铁砧没反应 | `/rad dust help` 对照三条：从上到下是**铁砧 → 发射器/投掷器 → 铁块**、中心格有**农作物**。缺任一条都不产出，但不会扣物品 |
 | 抗尘埃药喝了没反应 | 提示「冷却中」→ 等 `anti_dust.cooldown-seconds`；提示「配方已失效」→ 该档位已被配置删除，`/rad dust list` 看现存档位 |
 | 旧配置启动报「完全免疫」错误 | v1.2 禁止任何材质满配 ≥ 1.0。把该材质系数调低（默认下界合金 0.72） |
 | 玩家反映穿下界合金也被晒死 | **v1.2 有意如此**（72% 减免、仍吃 28%）。想免疫请用抗尘埃药 |
