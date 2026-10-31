@@ -54,12 +54,19 @@ public final class SunExposureChecker {
     /** chunk 段边长：16×16×16（§1.1 按 chunk 段缓存）。 */
     public static final int SECTION_SIZE = 16;
     /**
-     * 方块列扫描的起点下界（v1.3）：低于 1.21.11 世界里任何可放置/可站立方块的下限。
-     * 取 {@code MIN_BUILD_HEIGHT(0) - 1}：1.21 世界 y 从 -64 起，0 已在其上；更低的方块只可能是
-     * 深板岩/基岩，它们若在玩家头顶之上，扫描自然会在更高的位置先遇到真实遮挡。
-     * 为负 Y 世界留出的余量不必要也不危险——真正需要的是「不高于眼位」，0 满足。
+     * 纯内核默认扫描起点下界（无世界上下文时使用）。
+     *
+     * <p><b>v1.3.1 修复（负 Y 漏判）</b>：旧实现把扫描下界写死为 {@code 0 - 1 = -1}，
+     * 注释理由是「1.21 世界 y 从 -64 起，0 已在其上」——这句是错的。1.21 主世界 y 范围是
+     * <b>-64..319</b>，y&lt;0 是正常可站立层（深板岩层、矿洞、部分出生点）。扫描停在 -1
+     * 意味着区间 [-64, -1] 内的方块<b>从未被读过</b>：站在 y=-60、头顶一路到世界顶部全空的
+     * 玩家，{@code topmostCoverY} 会返回哨兵 -2，于是 {@code eyeY(-60) > -2} 为假 →
+     * 误判「遮蔽」→ 白天在地下露天区域完全不掉血（漏判危险，正是本类 §1.1 最忌讳的方向）。</p>
+     *
+     * <p>现在生产路径改用 {@link #columnScanStartY(int)}（由 {@code world.getMinHeight()} 驱动），
+     * 这个常量只作为纯内核/测试的兜底默认值保留，取 1.21 世界最低可放置高度。</p>
      */
-    private static final int MIN_BUILD_HEIGHT = 0;
+    static final int DEFAULT_MIN_BUILD_HEIGHT = -64;
 
     /**
      * 缓存键：世界名 + 方块列（x/z 的 16 格段）。
@@ -100,13 +107,27 @@ public final class SunExposureChecker {
     }
 
     /**
-     * 列级扫描起点。<b>必须从世界底部（或至少低于任何可站立高度）起算</b>，不能复用眼高
-     * 所在的 16 格段底：段底之上的判据 {@code eyeY > topCover} 只有在 topCover 是<b>整列</b>
-     * 顶遮挡时才成立。用段底会漏掉「段底以下、眼位以上」其实并不存在的方块——无遮挡列因此
-     * 得到一个偏高的哨兵值，段内低眼位会被误判为遮蔽（漏判危险，比误判安全更糟）。
+     * 列级扫描起点（带世界最低高度）：返回 {@code worldMinHeight - 1}，恒低于该世界任何
+     * 可放置/可站立方块，保证整列从严判起、不漏读负 Y 方块（v1.3.1 修复）。
+     *
+     * <p>调用方必须传 {@code world.getMinHeight()}（1.21 主世界 = -64），<b>不要传 0 或
+     * 眼高所在段的段底</b>：段底会漏掉「段底以下、眼位以上」的方块，使无遮挡列得到一个
+     * 偏高的哨兵值，段内低眼位被误判成遮蔽（漏判危险，比误判安全更糟）。</p>
      */
+    static int columnScanStartY(int worldMinHeight) {
+        return worldMinHeight - 1;
+    }
+
+    /**
+     * 列级扫描起点（无世界上下文的默认值）：等价于
+     * {@link #columnScanStartY(int) columnScanStartY(DEFAULT_MIN_BUILD_HEIGHT)}。
+     *
+     * @deprecated 生产路径一律使用 {@link #columnScanStartY(int)} 传入真实
+     *         {@code world.getMinHeight()}；本重载只保留给纯内核测试。
+     */
+    @Deprecated
     static int columnScanStartY() {
-        return MIN_BUILD_HEIGHT - 1;
+        return columnScanStartY(DEFAULT_MIN_BUILD_HEIGHT);
     }
 
     // ---------------------------------------------------------------- 纯内核
@@ -276,11 +297,14 @@ public final class SunExposureChecker {
      *       玩法零取舍。</li>
      * </ol>
      *
-     * <p>段粒度只影响 x/z，扫描从 {@link #columnScanStartY()}（世界底部之下）起算整列，
+     * <p>段粒度只影响 x/z，扫描从 {@link #columnScanStartY(int)}（世界最低高度之下）起算整列，
      * 因此得到的是<b>整列</b>顶遮挡，对任意 eyeY 都精确；豁免维度（下界/末地）恒短路 false 不扫描（§1.1）。</p>
+     *
+     * <p><b>v1.3.1</b>：新增 {@code worldMinHeight} 参数——由 {@code world.getMinHeight()} 驱动，
+     * 修复负 Y（-64..-1）整段盲区导致的露天误判为遮蔽。</p>
      */
     public boolean isExposed(World.Environment environment, String worldName,
-                             int eyeX, int eyeY, int eyeZ, int maxHeight,
+                             int eyeX, int eyeY, int eyeZ, int maxHeight, int worldMinHeight,
                              IntPredicate blockCovers) {
         if (!appliesTo(environment)) {
             return false; // 豁免维度（下界/末地）：无太阳，恒判“非露天”（§1.1）
@@ -292,23 +316,35 @@ public final class SunExposureChecker {
         }
         Integer stickyTop = lastKnownCache.getIfPresent(key);
         if (stickyTop != null && asyncDispatcher != null) {
-            scheduleAsyncRefresh(key, maxHeight, blockCovers);
+            scheduleAsyncRefresh(key, maxHeight, worldMinHeight, blockCovers);
             return eyeY > stickyTop; // 补扫在途：沿用上一已知判定（机制不变，新鲜度滞后一轮级）
         }
-        int top = topmostCoverY(maxHeight, columnScanStartY(), blockCovers);
+        int top = topmostCoverY(maxHeight, columnScanStartY(worldMinHeight), blockCovers);
         publish(key, top);
         return eyeY > top;
     }
 
+    /**
+     * 兼容重载（无世界最低高度）：按 {@link #DEFAULT_MIN_BUILD_HEIGHT}（1.21 世界最低点 -64）
+     * 起算。生产路径请改用带 {@code worldMinHeight} 的版本。
+     */
+    public boolean isExposed(World.Environment environment, String worldName,
+                             int eyeX, int eyeY, int eyeZ, int maxHeight,
+                             IntPredicate blockCovers) {
+        return isExposed(environment, worldName, eyeX, eyeY, eyeZ, maxHeight,
+                DEFAULT_MIN_BUILD_HEIGHT, blockCovers);
+    }
+
     /** 派发列级异步补扫（在途去重；调度拒绝/扫描异常一律静默，下轮自然重试）。 */
-    private void scheduleAsyncRefresh(ColumnKey key, int maxHeight, IntPredicate blockCovers) {
+    private void scheduleAsyncRefresh(ColumnKey key, int maxHeight, int worldMinHeight,
+                                      IntPredicate blockCovers) {
         if (!inFlight.add(key)) {
             return; // 同列已有在途补扫，共享结果
         }
         try {
             asyncDispatcher.dispatch(() -> {
                 try {
-                    int top = topmostCoverY(maxHeight, columnScanStartY(), blockCovers);
+                    int top = topmostCoverY(maxHeight, columnScanStartY(worldMinHeight), blockCovers);
                     publish(key, top);
                 } catch (RuntimeException | Error ex) {
                     // 异步补扫异常（如区块恰被卸载触发 Paper 异步加载防护）：不发布，
@@ -343,8 +379,10 @@ public final class SunExposureChecker {
         }
         int x = eyeLocation.getBlockX();
         int z = eyeLocation.getBlockZ();
+        // v1.3.1：必须传 world.getMinHeight()（主世界 -64），否则 [-64,-1] 段不被扫描，
+        // 站在负 Y 露天层会误判遮蔽（实机已复现）。
         return isExposed(world.getEnvironment(), world.getName(),
-                x, eyeLocation.getBlockY(), z, world.getMaxHeight(),
+                x, eyeLocation.getBlockY(), z, world.getMaxHeight(), world.getMinHeight(),
                 y -> {
                     Block block = world.getBlockAt(x, y, z);
                     return blockCountsAsCover(block.getBlockData().isOccluding(),

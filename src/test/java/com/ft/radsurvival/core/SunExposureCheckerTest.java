@@ -25,6 +25,7 @@ class SunExposureCheckerTest {
 
     private static final String WORLD = "world";
     private static final int MAX_HEIGHT = 320; // 主世界 maxHeight（§1.1 扫描上界）
+    private static final int MIN_HEIGHT = -64; // 主世界 minHeight（v1.3.1：负 Y 盲区修复后扫描下界基准）
 
     // ---------------------------------------------------------------- 扫描内核
 
@@ -194,14 +195,14 @@ class SunExposureCheckerTest {
             scans.incrementAndGet();
             return false;
         })).isTrue();
-        assertThat(scans.get()).isEqualTo(MAX_HEIGHT - (0 - 1));
+        assertThat(scans.get()).isEqualTo(MAX_HEIGHT - SunExposureChecker.columnScanStartY(MIN_HEIGHT));
         // 60.001s 后：条目过期 → 用「遮挡」谓词重扫 → 遮蔽，且自上而下只查到首个（顶）阻挡 70 即停
         clock.set(Duration.ofSeconds(61).toNanos());
         assertThat(checker.isExposed(World.Environment.NORMAL, WORLD, 0, 64, 0, MAX_HEIGHT, y -> {
             scans.incrementAndGet();
             return y == 70;
         })).isFalse();
-        assertThat(scans.get()).isEqualTo((MAX_HEIGHT - (0 - 1)) + (319 - 70 + 1));
+        assertThat(scans.get()).isEqualTo((MAX_HEIGHT - SunExposureChecker.columnScanStartY(MIN_HEIGHT)) + (319 - 70 + 1));
     }
 
     @Test
@@ -259,7 +260,7 @@ class SunExposureCheckerTest {
         // 否则段底以下被跳过、哨兵值偏高，段内低眼位会被误判为遮蔽）
         assertThat(scans.get())
                 .as("玻璃不算遮蔽（transparentCountAsCover=false）→ 整列扫到底，无提前终止")
-                .isEqualTo(200 - (0 - 1));
+                .isEqualTo(200 - SunExposureChecker.columnScanStartY(MIN_HEIGHT));
     }
 
     // ---------------------------------------------------------------- v1.3 判定稳定性回归
@@ -281,7 +282,7 @@ class SunExposureCheckerTest {
                     .as("列内无遮挡时眼高 %d 必须判露天", eyeY).isTrue();
         }
         // 旧实现：63→段3、64→段4 两个键各扫一次，且两次扫描起点不同（16*3+1=49 / 16*4+1=65）
-        int columnScan = MAX_HEIGHT - (0 - 1);
+        int columnScan = MAX_HEIGHT - SunExposureChecker.columnScanStartY(MIN_HEIGHT);
         assertThat(scans.get())
                 .as("v1.3：同一方块列只扫一次（旧实现跨 y 段会重扫，蹲起即可触发）")
                 .isEqualTo(columnScan);

@@ -75,6 +75,20 @@
     现在**两种拼写都接受**、正确拼写优先，两者并存时给出明确提示；`config.yml` 已改用正确拼写。
     老配置无需修改。
 
+#### 露天判定（实机验证发现，见下条 v1.3.2）
+
+16. **负 Y 区间（y < 0）露天判定整段漏判 —— 地下露天玩家白天不掉血**
+    `SunExposureChecker` 把列扫描下界写死为 `MIN_BUILD_HEIGHT(0) - 1 = -1`，注释理由
+    「1.21 世界 y 从 -64 起，0 已在其上」是错的：1.21 主世界 y 范围是 **-64..319**，
+    y<0 是正常可站立层（深板岩层、矿洞、部分出生点）。扫描停在 -1 意味着 `[-64,-1]`
+    区间的方块**从未被读过**，无遮挡列因此返回哨兵 `-2` → `eyeY(-60) > -2` 为假 →
+    判成「遮蔽」→ 白天在地下露天区域**完全不掉血**（漏判危险，正是 §1.1 最忌讳的方向）。
+    实机复现：玩家站在 y=-60、头顶一路到 319 全空，`/rad status` 报「遮蔽/豁免维度（安全）」。
+
+    现改为由 `world.getMinHeight()` 驱动的 `columnScanStartY(worldMinHeight)`，
+    扫描下界 = `worldMinHeight - 1`，任何世界都不留盲区；旧无参重载保留为
+    `@Deprecated` 的纯内核默认值（取 -64）。
+
 #### 测试
 
 - 新增 42 条用例：`BugHuntRegressionTest`(9)、`ConfigNonFiniteNumberTest`(5)、
@@ -82,6 +96,27 @@
   `SunMarkReloadLeakMockBukkitTest`(3)、`CommandOutputWidthTest`(13)、
   `PluginConfigValidationTest`(+1 历史拼写兼容)、`AntiDustChainMockBukkitTest`(+1)。
 - `AntiDustChainMockBukkitTest` 中把漏洞断言为正确行为的两条用例已改写为期望行为。
+
+#### v1.3.2 — 实机验收驱动的负 Y 漏判修复（待发版）
+
+> 由一次「Paper 1.21.11-132 + 原版 1.21.11 客户端」的实机验收驱动。
+> 该缺陷**在 310 条测试全绿的情况下漏网**，因为既有 `SunExposureCheckerTest`
+> 的所有用例眼高都是 `y ≥ 64`，从未覆盖负 Y 区间。
+
+##### 修复
+
+- **负 Y 露天判定漏判**（缺陷 16）：`SunExposureChecker` 的列扫描下界改为由
+  `world.getMinHeight()` 驱动，不再写死 -1。实机复验：同一位置由
+  「遮蔽/豁免维度（安全）」翻转为「露天（头顶可见天空）」，腐蚀开始累积、伤害开始落地。
+
+##### 测试
+
+- 新增 `NegativeYExposureRegressionTest`(5)：负 Y 露天/遮蔽/世界最低层/正 Y 对照/
+  扫描起点契约。**反向验证**：把 `columnScanStartY` 改回返回 -1，3 条负 Y 用例
+  立即变红（正 Y 对照仍绿），证明钉子确实咬住该缺陷。
+- `SunExposureCheckerTest` 中 4 处写死 `(0 - 1)` 的扫描格数断言改为
+  `columnScanStartY(MIN_HEIGHT)` 派生，避免把错误下界定死进测试。
+- 测试总数 310 → **315**，全绿。
 - 全量：**310 tests, 0 failures, 0 errors, 0 skipped**。
 
 #### 文档
