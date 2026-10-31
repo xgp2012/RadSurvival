@@ -13,6 +13,7 @@ import com.ft.radsurvival.command.RadCommand;
 import com.ft.radsurvival.config.PluginConfig;
 import com.ft.radsurvival.core.DamageApplier;
 import com.ft.radsurvival.core.RadiationServices;
+import com.ft.radsurvival.core.ServerBrand;
 import com.ft.radsurvival.feedback.FeedbackService;
 import com.ft.radsurvival.item.DustCraftGui;
 import com.ft.radsurvival.item.DustItemFactory;
@@ -87,8 +88,21 @@ public class RadSurvivalPlugin extends JavaPlugin {
      */
     private volatile SunRadiationListener sunRadiation;
 
+    /**
+     * v1.4：服务端品牌识别结论（plan.md §7）。onEnable 最先写入，供启动日志与
+     * {@code /rad status} 展示来源；识别失败或未启用时为 null。
+     */
+    private volatile ServerBrand.Detection brand;
+
     @Override
     public void onEnable() {
+        // —— plan.md §7 服务端品牌自适应 Profile（v1.4）：识别 + 防御，不做按品牌调参。
+        //     必须放在最前面：Spigot/Folia 上的失败是「一坨 NoClassDefFoundError 堆栈」或
+        //     「调度器抛 UnsupportedOperationException」，放在后面只会让管理员看不出真正原因。
+        if (!guardServerBrand()) {
+            return;
+        }
+
         // 首次运行：把 jar 内默认 config.yml 释放到插件数据文件夹
         saveDefaultConfig();
 
@@ -155,6 +169,55 @@ public class RadSurvivalPlugin extends JavaPlugin {
         getLogger().info("接线 · 监听器 " + listenerCount + " 个（会话/标记/伤害门控/反馈/死亡文案"
                 + (cfg.antiDust().enabled() ? "/抗尘埃药" : "") + "），在线玩家 "
                 + getServer().getOnlinePlayers().size() + " 名已预填，命令 /rad help 查看用法。");
+        // v1.4 §7：品牌只做展示与兜底提示，不参与任何数值决策（无 profiles 预设）。
+        ServerBrand.Detection det = this.brand;
+        if (det != null) {
+            getLogger().info("平台 · " + det.describe()
+                    + (det.brand() == ServerBrand.Brand.UNKNOWN
+                            ? "（未实测分支，按 Paper 同面 API 运行；如遇问题请附本行）" : ""));
+        }
+    }
+
+    /**
+     * plan.md §7「服务端品牌自适应 Profile」的<b>防御分支</b>（v1.4）。
+     *
+     * <p>本期只做「识别 + 防御」，<b>不做按品牌调参</b>：§7.2 的边界表里，唯一随品牌变化的
+     * 维度是主线程压力特征，而 M2 后主线程稳态已近零开销（露天补扫走异步池），按品牌去改
+     * {@code tick-interval} / 缓存 TTL 等于拿实测数据换猜测。{@code profiles.<brand>} 与三层
+     * 优先级因此整体缓建，等确有服务端侧的实测差异再引入。</p>
+     *
+     * <p><b>为什么必须先于一切 Paper API 调用</b>：在纯 Spigot 上，本类第一个触达
+     * {@code DamageSource}/{@code Component} 的语句（例如 {@code PluginConfig} 的日志格式化、
+     * 甚至 {@code Component} 相关常量）就会抛 {@code NoClassDefFoundError}，且抛出点往往在
+     * 类初始化期间，栈里根本看不出「换服务端」才是解法。此处在最前面用类探测给出确定结论。</p>
+     *
+     * <p><b>为什么 Folia 不是「WARNING 后继续」</b>：{@code BukkitScheduler} 的全局任务在
+     * Folia 上直接抛 {@code UnsupportedOperationException}，而本插件的主循环、HUD 任务、
+     * 露天异步补扫全部依赖全局调度——继续加载只会得到「启动成功但完全不工作」的假象，
+     * 比拒绝加载更难排查。</p>
+     *
+     * @return true = 可以继续启用；false = 已调用 disablePlugin，onEnable 应立即返回
+     */
+    private boolean guardServerBrand() {
+        // server.getName() 是纯 Bukkit 方法（Server#getName 自 1.0 起存在），在任何分支上都安全
+        String rawName;
+        try {
+            rawName = getServer().getName();
+        } catch (RuntimeException | LinkageError e) {
+            rawName = null; // 极个别分支会在此抛；退化为纯类探测
+        }
+        ServerBrand.Detection detection = ServerBrand.detectCurrent(rawName);
+        this.brand = detection;
+
+        if (detection.brand().supported()) {
+            return true;
+        }
+        Logger log = getLogger();
+        log.severe("检测到服务端 " + detection.describe() + "，本插件无法在此运行，已自动禁用。");
+        log.severe("原因：" + detection.brand().refusalReason() + "。");
+        log.severe("请改用 Paper 1.21.11（或 Leaf / Purpur 等 Paper 分支）后重新挂载本插件。");
+        getServer().getPluginManager().disablePlugin(this);
+        return false;
     }
 
     /**
@@ -291,6 +354,18 @@ public class RadSurvivalPlugin extends JavaPlugin {
      */
     public SunRadiationListener sunRadiation() {
         return sunRadiation;
+    }
+
+    /**
+     * v1.4：服务端品牌识别结论（plan.md §7）。
+     *
+     * <p>reload 不重新识别——品牌在一次 JVM 生命周期内不会变化，重新探测只会让
+     * {@code /rad status} 的来源说明在两次调用间漂移。仅在 onEnable 写入一次。</p>
+     *
+     * @return 识别结论；未启用/识别前为 null
+     */
+    public ServerBrand.Detection brand() {
+        return brand;
     }
 
     /**

@@ -23,6 +23,7 @@ import com.ft.radsurvival.core.RadiationServices;
 import com.ft.radsurvival.core.RadiationTask;
 import com.ft.radsurvival.core.RadiationTask.RoundOutcome;
 import com.ft.radsurvival.core.RadiationTask.RoundResult;
+import com.ft.radsurvival.core.ServerBrand;
 import com.ft.radsurvival.item.DustCraftGui;
 
 /**
@@ -317,11 +318,18 @@ public final class RadCommand implements CommandExecutor, TabCompleter {
     private void sendConsoleSummary(CommandSender sender, PluginConfig cfg, RadiationServices services) {
         PluginConfig.CorrosionConfig cor = cfg.corrosion();
         CommandOutput out = CommandOutput.of(sender,
-                "config", "corrosion", "online", "worlds", "tick-interval", "base-damage", "night-multiplier",
-                "require-on-ground", "smooth-transition", "enabled-worlds", "dimensions", "async-scan");
+                "config", "platform", "corrosion", "online", "worlds", "tick-interval", "base-damage",
+                "night-multiplier", "require-on-ground", "smooth-transition", "enabled-worlds",
+                "dimensions", "async-scan");
 
         out.header("RadSurvival status · 控制台摘要");
         out.kv("config", "§7" + services.describeFlags());
+        // v1.4 §7：品牌识别结论 + 识别来源（透明化；无 profiles 预设，故不展示「生效键/覆写键」）
+        ServerBrand.Detection det = plugin.brand();
+        out.kv("platform", det == null
+                ? "§8— §7（未识别或插件未启用）"
+                : "§e" + det.describe()
+                        + (det.brand() == ServerBrand.Brand.UNKNOWN ? " §7（未实测分支，按 Paper 同面运行）" : ""));
         out.kv("tick-interval", "§e" + cfg.tickInterval()
                 + " §8（tick-interval= 结算间隔，≥20 = 无敌帧下限，§1.3）");
         out.kv("base-damage", "§e" + CommandOutput.fmt(cfg.baseDamage())

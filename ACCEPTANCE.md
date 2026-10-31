@@ -559,4 +559,85 @@ y=-59…319 **全是空气**，`/rad status` 却报「遮蔽/豁免维度（安�
 > 木棍右键铁砧的真实触发、GUI 点击/拖拽约束、服药后的动作与音效。
 > 这三项的 MockBukkit 覆盖仍然有效，但真实客户端交互本轮没能完整跑到。
 
+---
+
+## M. 跨服务端品牌实测（v1.4.0）
+
+> 环境：本机 Windows，JDK 21，各分支独立目录 / 独立端口 / 独立 JVM（`-Xmx768M`），
+> 脚本 [test-servers/run-smoke.ps1](test-servers/run-smoke.ps1)。
+> 目的不是复跑 §D 的 17 项手册，而是回答「这个分支上插件能不能加载、识别对不对、
+> 主循环跑不跑得动」——即 plan.md §7.5 对「支持矩阵声明」的最低要求。
+>
+> **操作手册见 [PLATFORMS.md](PLATFORMS.md)**（怎么备 jar、怎么跑、结果怎么判读）。
+> 本节只记录**结论与证据**。
+
+### M.1 结论总览
+
+| 分支 | 版本 | 识别结果（来源） | `onEnable` | 判定 |
+|---|---|---|---|---|
+| **Paper** | 1.21.11-132 | `Paper（类探测）` | 正常启用，7 监听器 | ✅ 通过 |
+| **Leaf** | 1.21.11-179 | `Leaf（server.getName()）` | 正常启用，7 监听器 | ✅ 通过 |
+| **Folia** | 1.21.11-14 | `Folia（类探测）` | **拒绝加载 + 三条中文提示** | ✅ 通过（防御分支） |
+| **Purpur** | 1.21.11-2568 | — | **未能实测** | ⚠️ 下载源不可达 |
+
+`/rad status` 的 `platform` 行在三者上都正确输出了识别结果与来源。
+
+### M.2 实测发现的真实缺陷：Folia 的防御代码曾是死代码
+
+**现象**：Folia 上插件根本没有被加载，服务端在**插件加载阶段**（类尚未加载）就拒绝：
+
+```
+[DirectoryProviderSource] Error loading plugin: Could not load plugin 'RadSurvival v1.0.0-SNAPSHOT'
+as it is not marked as supporting Folia!
+```
+
+**这意味着** `RadSurvivalPlugin#guardServerBrand()` 里的 FOLIA 分支**一次都不会执行**——
+它在 Folia 上是死代码。单测 `ServerBrandTest` 只验证了「识别逻辑返回 FOLIA」，
+但**无法**验证「这个返回值真的会被读到」，因为插件类压根没被加载。
+
+**根因**：Paper/Folia 在 `plugin.yml` 缺省 `folia-supported` 时，于 provider 注册阶段直接拒绝，
+不进入 `onEnable`。这与 Spigot 的失败形态不同（Spigot 会加载并执行 `onEnable`，只是抛
+`NoClassDefFoundError`）——**同一个「防御分支」在两个服务端上的可达性完全不同**。
+
+**修复**：`plugin.yml` 增加 `folia-supported: true`。注意这**不表示**功能支持 Folia，
+只是允许插件被载入以便我们的提示接管：
+
+```
+[RadSurvival] 检测到服务端 Folia（类探测），本插件无法在此运行，已自动禁用。
+[RadSurvival] 原因：Folia 使用区域化线程模型，全局调度器任务（主循环 / HUD / 露天异步补扫）在其上不可用。
+[RadSurvival] 请改用 Paper 1.21.11（或 Leaf / Purpur 等 Paper 分支）后重新挂载本插件。
+[RadSurvival] Disabling RadSurvival v1.0.0-SNAPSHOT
+```
+
+**复验**：加 `folia-supported: true` 后重跑，三条提示全部弹出，`Disabled` 正常；
+同时重跑 Paper 与 Leaf，二者行为**无任何变化**（确认该字段无副作用）。
+
+> **教训**：MockBukkit 集成测试跑在 Paper 系语义上，**测不到**「服务端在插件加载阶段就拒绝」
+> 这类分支。凡是「防御性拒绝」逻辑，必须在真实该分支上一次真机才能确认可达性。
+> 这与 §10.5「假绿」记录同源：断言通过 ≠ 那段代码被走到过。
+
+### M.3 Leaf 的识别来源为什么是 getName 而非类探测
+
+Leaf 上 `平台 · Leaf（server.getName()：getName=Leaf）` —— 走的是**名字匹配**分支，
+而非 `DamageSource` 类探测。原因是 Paper 系分支的 `damage` 类由 **paperclip 在启动时
+重映射/注入**，插件 `onEnable` 阶段的类加载器未必能直接 `Class.forName` 到。
+
+这不影响正确性（结果仍是 Leaf→可运行），但说明：
+- **类探测并非在所有分支上都可靠回落到 Paper 判定**；
+- 因此 `getName()` 的唯一名匹配（purpur/leaf/folia）必须保留在前，不能因为「类探测优先」
+  就删掉——它在这条路径上是**唯一**能给出精确分支名的证据；
+- `unknown` 兜底放行也因此是必要的（否则所有走不到类探测的分支都会被拒）。
+
+### M.4 Purpur：实测受阻（非插件问题）
+
+`api.purpurmc.org` 的**构建元数据**可达（`/v2/purpur/1.21.11` 返回 build 2568），
+但**二进制下载端点**（`/v2/purpur/1.21.11/2568/download`）在本网络下极不稳定：
+首轮完全停滞（0 B/20s），改 .NET 流式下载后约 2 KB/s。`purpurmc.org` 主站、
+`ci.purpurmc.org`、`repo.purpurmc.org` 均超时。
+
+**结论**：Purpur 的识别与加载**未经实测**，文档中维持「Paper 分支，理论可用，未实测」表述。
+补齐方法：在能正常访问 purpurmc.org 的机器上跑
+`test-servers/run-smoke.ps1 -Server purpur`（脚本已备好，只需放入 jar）。
+
+
 

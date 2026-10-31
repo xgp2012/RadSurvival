@@ -162,12 +162,16 @@ commands:
 6. **夜出玩法正向增益**：夜晚不仅减伤，还可给予速度/夜视奖励（夜间探索更安全 → 玩法核心矛盾已立住）。
 7. **PlaceholderAPI / 其他插件联动**：`%radsurvival_level%`、`%radsurvival_corrosion%` 等；`softdepend` 预留。
 8. **API 事件**：`RadiationExposureEvent`（cancellable + 可改伤害）本期就建好，方便后续服务端玩法包接入。
-9. **服务端品牌自适应 Profile（§7，待实施）**：识别运行时服务端分支（Paper/Leaf/Purpur/Folia/Spigot…），按品牌应用调优预设，三层优先级"用户显式值 > 品牌 profile > 内置默认"。详见 §7。
+9. **服务端品牌自适应 Profile（§7，v1.4 已实施识别+防御）**：识别运行时服务端分支（Paper/Leaf/Purpur/Folia/Spigot…），按品牌应用调优预设，三层优先级"用户显式值 > 品牌 profile > 内置默认"。详见 §7。
 
-## 7. 服务端品牌自适应 Profile（设计预留，待实施）
+## 7. 服务端品牌自适应 Profile（v1.4 已实施「识别 + 防御」，调参部分缓建）
 
 > 背景：M4 后插件主线程稳态已近零开销（§H 异步管线），但为后续重型功能（怪物辐射、落尘事件、
 > 群系系数）预留"按服务端分支调优"的框架位；同时提供 Folia/Spigot 的**防御性识别**。
+>
+> **✅ 实施状态（v1.4.0）**：§7.1 识别与 §7.4 防御分支**已实施**（`core/ServerBrand`
+> + `RadSurvivalPlugin#guardServerBrand`）；§7.3 三层优先级与 `profiles.<brand>` 预设段
+> **有意缓建**，理由见 §7.6。
 
 ### 7.1 识别方式
 
@@ -177,6 +181,14 @@ String full  = server.getVersion();  // 含构建号
 // 兜底：类存在性探测（如 Folia 的 RegionizedServer、Paper 独有包），避免 getName 被改
 ```
 归一化为枚举：`paper | leaf | purpur | spigot | folia | unknown`。
+
+> **实施修正**：计划里把类探测写成「兜底」，实测口径相反——`getName()` 只是可被分支服务端
+> 随意改写的字符串（Leaf/Purpur 都返回自己的名字），无法证明「Paper 专属 API 真的存在」；
+> 类存在性是编译期事实。因此实际实现**类探测优先**：
+> ①`RegionizedServer` → Folia；②名字唯一命中 Purpur/Leaf；③`DamageSource` 可加载 → Paper；
+> ④名字含 spigot 且探测阴性 → Spigot；⑤兜底 unknown。
+> 其中 ③ 之所以成立，是因为 `DamageSource` 正是本插件自己编译依赖的类——
+> 「能加载它」与「本插件的字节码能跑」在实践中等价。
 
 ### 7.2 能调什么（重要边界）
 
@@ -189,24 +201,49 @@ String full  = server.getVersion();  // 含构建号
 
 ### 7.3 三层优先级（防"自动改值吓到管理员"）
 
+> ⚠️ **本节未实施**（v1.4 缓建，见 §7.6）。以下为原始设计，保留供后续引入时参考。
+
 ```
 用户在 config.yml 显式写的键  >  品牌 profile 预设  >  内置默认值
 ```
 - Configurate 节点 presence 检测：仅对"用户未写"的键填入 profile 值；
+  （可行性已核实：`PluginConfig` 本就基于 `YamlConfigurationLoader`，该能力现成）
 - config.yml 新增可选段：`adaptive-profile: auto|off|generic|paper|leaf` + `profiles.<brand>: {键: 值}`（管理员可覆写任何预设）；
 - 透明化：启用日志打印"检测到 X → profile=Y，预设生效键列表/用户覆写键列表"；`/rad status` 增 profile 与来源展示。
 
 ### 7.4 防御分支
 
 - **Spigot**：插件以 paper-api 编译（`DamageSource`、`Component` 等为 Paper 专属），NoClassDefFoundError 时 try/catch 并提示"需要 Paper 系服务端"；
+  → 实施为：在 `onEnable` **最前面**用类探测先给出确定结论再 `disablePlugin`，不依赖异常兜底
+  （异常抛出点常在类初始化期间，从堆栈看不出「换服务端」才是解法）。
 - **Folia**：WARNING + 禁用（见 7.2）；
+  → 实施为：同样在 `onEnable` 最前面拒绝。注意 Folia 的 `RegionizedServer` 使其**同时**
+  满足「能加载 Paper 类」，所以 Folia 判定必须排在 Paper 之前。
 - **unknown**：按 `generic` 跑（=现默认值）+ 日志提示可手动指定——**绝不对未实测分支启用激进预设**。
 
 ### 7.5 实施边界与验收
 
-- 初期只内置 `generic`（=现值）与 `paper`（=现值，全部实测都在 Paper 上完成）；`leaf` 槽位留空壳（等同 generic + 日志说明"尚未针对 Leaf 实测"），等实测数据再填；
+- ~~初期只内置 `generic`（=现值）与 `paper`（=现值）；`leaf` 槽位留空壳~~
+  → 实际实施时不引入任何预设，因此 `leaf` 无需空壳；
 - 每个 profile 视为一次"支持矩阵"声明：须按 §5-M4 同款清单回归后才能写入非默认预设；
-- 预估规模：检测器 + presence 优先级 + 配置段 + status/日志展示 + 测试 ≈ 1 个子代理任务，不触碰核心判定数学与既有 169 条测试语义。
+- ~~预估规模：检测器 + presence 优先级 + 配置段 + status/日志展示 + 测试 ≈ 1 个子代理任务~~
+  → 实际落地：`core/ServerBrand`（约 200 行，纯 Java）+ `guardServerBrand`（约 30 行）
+  + 启动日志/status 各一行 + 14 条测试，**未触碰核心判定数学**，既有 315 条语义不变。
+
+### 7.6 为什么缓建「按品牌调参」
+
+§7.2 的边界表里，唯一随品牌变化的维度是**主线程压力特征**，而 M2 后主线程稳态已近零开销
+（露天补扫走异步池）。在没有任何跨服务端实测数据的前提下，按品牌改
+`tick-interval` / 缓存 TTL / HUD 频率有两重问题：
+
+1. **收益为负**：这些旋钮的值域受玩家可感知体验约束（`tick-interval` 改小会撞无敌帧，
+   改大会让伤害变「跳」），可调空间本就极窄；
+2. **可解释性变差**：同一份 config.yml 在不同服务端生效值不同，而 `profiles.<brand>`
+   又允许管理员覆写，最终「这个服到底跑的是哪组数」需要三层叠加才能算出来——
+   与 §7.3 自己提出的「防自动改值吓到管理员」初衷相悖。
+
+**恢复条件**：拿到真实跨服务端实测差异（例如某分支上异步补扫显著更慢、或某分支默认
+view-distance 导致缓存命中率骤降），再引入**只含 1~2 个键**的最小配置段，不做通用预设框架。
 
 ## 5. 构建、第三方依赖与里程碑
 
@@ -271,4 +308,17 @@ FATAL 级考量后**不采用构建混淆**（ProGuard 在 Java 21 + 内嵌 Caff
 把 y 段编进键会让同一列被不同高度段各算一次、结果互相覆盖（判定抖动），且蹲起跨段界即重扫。
 玩法数值与其余设计口径全部未变。测试 265 → 268，详见 CHANGELOG v1.3 与 DEVELOPMENT §3.1 / §10.6。
 
-**下一步（候选）**：§7 服务端品牌自适应 Profile（Folia/Spigot 防御识别优先）→ §4.1 辐射病模式 → §4.2 防护装备体系。
+**2026-10-31 增量（v1.4）**：§7 落地「识别 + 防御」——`core/ServerBrand` 归一化
+`paper/leaf/purpur/spigot/folia/unknown` 并记录识别来源，`onEnable` 首步据其拒绝
+Spigot / Folia；**§7.3 三层优先级与 `profiles.<brand>` 预设段有意缓建**（理由见 §7.6）。
+玩法数值、判定口径、配置键全部未变。测试 315 → 332，详见 CHANGELOG v1.4 与
+DEVELOPMENT §10.8；跨分支实测结论见 ACCEPTANCE §M，操作手册见 [PLATFORMS.md](PLATFORMS.md)。
+
+> **实测修正了计划里的一处设计假设**：原定「类探测作兜底、`getName()` 为主」，
+> 实测证明应反过来（`getName()` 可被分支服务端改写，类存在性才是编译期事实）；
+> 但同时发现 Leaf 上 paperclip 重映射导致类探测不可用，名字匹配仍是必需的。
+> **Folia 的拒绝还需 `plugin.yml` 声明 `folia-supported: true` 才能生效**——否则服务端
+> 在插件加载阶段就拒了，`onEnable` 一行都跑不到，防御代码成为死代码。见 DEVELOPMENT §10.8.1。
+
+**下一步（候选）**：§4.1 辐射病模式 → §4.2 防护装备体系 →（有条件）§7.3 最小预设段
+（需先拿到跨服务端实测差异，见 §7.6）。

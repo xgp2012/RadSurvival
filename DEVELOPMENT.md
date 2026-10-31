@@ -12,16 +12,21 @@
 
 | 顺序 | 做什么 | 耗时 |
 |---|---|---|
-| 1 | 跑通 `mvn -B clean package`，确认 **315 条全绿** | ~2 min |
+| 1 | 跑通 `mvn -B clean package`，确认 **332 条全绿**（JDK 21，见 §12 警告） | ~2 min |
 | 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
-| 3 | 读 [§3.1 露天判定的缓存与列键](#31-露天判定的缓存与列键v13-改写改判定前必读)，判定抖动的根因都在这里 | 5 min |
+| 3 | 读 [§3.1 露天判定的缓存与列键](#31-露天判定的缓存与列键v13-改写-v132-修下界改判定前必读)，判定抖动的根因都在这里 | 5 min |
 | 4 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
 | 5 | 读 [§4 伤害出口](#4-伤害出口damageapplier)，改伤害相关代码前必看 | 5 min |
 | 6 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
 | 7 | **要改既有逻辑前**，先看 [§10.5 排查方法论](#105-v12-排查方法论怎么把看起来没问题的代码查出洞) | 8 min |
+| 8 | 要碰「服务端检测 / 拒绝加载 / 调度」类代码，加读 [§10.8.1 单测全绿 ≠ 代码被走到过](#1081-单测全绿-那段代码被走到过folia-死代码) 与 [PLATFORMS.md](PLATFORMS.md) | 8 min |
 
 > **最容易被忽略的一条**：本插件的伤害数字**不是**靠 `DamageType` 区分的，
 > 而是靠「结算瞬间摘掉盔甲 + 时间窗标记」这套机制。看到相关代码觉得绕，先读 §4.2。
+
+> **第二容易被忽略的**：**测试全绿不代表那段代码被执行过**。v1.4 的 Folia 防御分支
+> 有 14 条测试 + 3 项反向验证护航，真机上却一行都没跑（服务端在加载阶段就拒了）。
+> 详见 §10.8.1——这类「值对但不可达」的缺陷，只有真机能抓到。
 
 ---
 
@@ -33,7 +38,7 @@
 | 语言/JDK | Java **21**（`maven.compiler.release=21`） |
 | 构建 | Maven 3.10+，JDK 21（本机验证：`D:\java21`，Azul Zulu 21.0.12.1） |
 | 产物 | 自包含 fat jar，约 1.8 MB，内嵌库已 relocate 到 `com.ft.radsurvival.lib.*` |
-| 测试规模 | **315 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
+| 测试规模 | **332 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
 | NMS | **零依赖**（纯 Bukkit/Paper API） |
 
 **一句话架构**：`config` 解析并校验 → `core` 七单例承载全部纯逻辑 → `RadiationTask` 每
@@ -309,7 +314,7 @@ src/test/java/com/ft/radsurvival/
 ```powershell
 $env:JAVA_HOME='D:\java21'
 $env:MAVEN_OPTS='-Duser.language=en -Dfile.encoding=UTF-8'   # 避免 GBK 下中文编译错误
-mvn -B clean package            # 全量（315 条）
+mvn -B clean package            # 全量（332 条）
 mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 ```
 
@@ -351,15 +356,35 @@ mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 - **写死常量的断言要慎用**：断言「扫描了 N 格」「执行了 M 次」这类实现细节时，让它从被测
   常量**派生**（如 `MAX_HEIGHT - columnScanStartY(MIN_HEIGHT)`），不要把某个具体字面量
   固化成期望值——否则下界一改，测试反而变成「错误行为的看门人」（v1.3.2 就修过 4 处）。
+- **★ 分清「值的错误」与「可达性的错误」**（v1.4 新增，代价是一次差点发布死代码）：
+  回归测试天然只验证**函数返回值对不对**，验证不了**这段代码在生产上会不会被走到**。
+  v1.4 的 Folia 防御分支就是这样：11 条识别单测 + 3 条接线集成测试 + 3 项反向验证全绿，
+  但 Folia 在插件加载阶段就把插件拒了，`onEnable` 根本没执行——**逻辑正确、代码不可达**。
+  详见 §10.8.1。
 
-### 8.4 测试分布（v1.3.2，共 315 条）
+  因此写测试时请自问那一层：
+  | 问题 | 谁来回答 |
+  |---|---|
+  | 这个函数算得对吗？ | 单元测试（`core/`） |
+  | 这段代码在生产路径上被调到了吗？ | 集成测试（`mockbukkit/`）——**但仅限 Paper 语义** |
+  | 换一个运行环境（别的服务端/加载器/线程模型）还可达吗？ | **只能真机**，见下条 |
 
-按包实测（`mvn -B clean package` 的 Surefire 汇总）：
+- **防御性代码必须真机验证**：凡「检测到不支持 → 拒绝/降级」的逻辑，都是在断言**运行环境**，
+  而某些环境行为发生在你的代码存在之前（服务端加载阶段拦截、调度器拒绝、类加载隔离）。
+  MockBukkit 跑在 Paper 语义上，天然测不到这些。这类改动请按
+  `test-servers/run-smoke.ps1` 在真实分支上各跑一次（v1.4 的流程，结论记 ACCEPTANCE §M）。
+- **不可达的代码要能被「发现」**：如果一个分支做了反向验证、也在文档里声称「经测试」，
+  但实际永不执行，那它比没有更糟——后来者会相信它。因此文档里描述防御分支时，
+  请写明验证**达到哪一层**（单测/集成/真机），不要一律写「已验证」。
+
+### 8.4 测试分布（v1.4.0，共 332 条）
+
+按包实测（`mvn -B clean package` 的 Surefire 汇总；**须在 JDK 21 下跑**，见 §12）：
 
 | 包 | 条数 | 内容 | 特点 |
 |---|---|---|---|
-| `mockbukkit/` | 138 | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` | 生产代码路径，除注入缝外不 mock |
-| `core/` | 85 | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键 + v1.3.2 负 Y 回归**）、`DustImmunity`、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
+| `mockbukkit/` | 141 | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` / 品牌接线 | 生产代码路径，除注入缝外不 mock |
+| `core/` | 99 | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键 + v1.3.2 负 Y 回归**）、`DustImmunity`、`ServerBrand`（v1.4 识别与防御方向，含隔离类加载验证）、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
 | `config/` | 60 | `PluginConfigValidationTest`、`PluginConfigFeedbackValidationTest` | 纯 Java，无需服务器；**新增配置键必须在这里加校验断言** |
 | `command/` | 13 | `CommandOutputWidthTest`（显示宽度/对齐） | 命令包此前零测试，v1.3.1 补齐 |
 | `feedback/` | 11 | `HudRendererTest`（纯字符串渲染） | 新宽字符要进 `WIDE_SYMBOLS` |
@@ -389,7 +414,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 > v1.3 起：第 1~4 项已由 CI 的「Verify tests actually ran」与「Verify fat jar self-containment」
 > 两步**自动执行**（push/PR 都会跑）；本清单保留给本地发版前的人工复核。
 
-1. `mvn -B clean package` → `Tests run: 315, Failures: 0, Errors: 0, Skipped: 0`
+1. `mvn -B clean package` → `Tests run: 332, Failures: 0, Errors: 0, Skipped: 0`
 2. 产物大小约 1.8 MB；jar 内 `com/ft/radsurvival/lib/*` ≥ 1259 项；
    `org/spongepowered/*`、`com/github/benmanes/*` **零泄漏**；
 3. 内嵌 `config.yml` 与 `src/main/resources/config.yml` **逐字节一致**；
@@ -724,11 +749,118 @@ static int columnScanStartY(int worldMinHeight) { return worldMinHeight - 1; }
 写死 `(0 - 1)` 的扫描格数断言改为 `columnScanStartY(MIN_HEIGHT)` 派生，避免把错误下界
 再次固化成「期望值」。
 
+### 10.8 v1.4 品牌识别：判断方向与「未实测等于未验证」
+
+plan.md §7 原先写的是「类探测作兜底、`getName()` 为主」。落地时**把主次反了过来**，原因值得记录：
+
+| 坑 | 事实 |
+|---|---|
+| **`getName()` 证明不了任何能力** | 它只是一个分支服务端可以随意改写的字符串。判断「Paper API 在不在」应该问类存在性——那是编译期事实。计划里的「兜底」其实是唯一可靠的一手证据 |
+| **Folia 的判定必须排在 Paper 之前** | Folia 是 Paper 分支，`DamageSource` 同样可加载。若先判 Paper，Folia 会被误判成「可运行」→ 启用后主循环直接抛 `UnsupportedOperationException`，且抛出点在调度器而非插件装配代码，堆栈很难读。`ServerBrandTest#foliaWinsOverPaperClass` 钉住这一点（反向验证：去掉优先判断后 2 条用例变红） |
+| **「拒绝」比「放行后崩」更适合本次的两条分支** | Spigot 的失败形态是 `onEnable` 抛 `NoClassDefFoundError`（常在类初始化期间），Folia 是「启动成功但完全不工作」。两者对管理员都是**不可诊断**的；启动首步给中文结论的收益远大于「尽量让插件装上」 |
+| **但 unknown 不能拒绝** | 判据的可靠性与覆盖面成反比：越保守地拒绝，越多小众分支装不上。因此 unknown **放行**并在日志/status 标注「未实测分支」，把判断权交回管理员 |
+| **缓建调参框架也是一种工程决定** | §7.2 里唯一随品牌变化的维度是主线程压力特征，而本插件主线程稳态已近零开销。没有跨服务端实测数据就按品牌改 `tick-interval`/缓存 TTL，等于用配置复杂度换猜测。见 plan.md §7.6 的恢复条件 |
+
+#### 10.8.1 ★ 单测全绿 ≠ 那段代码被走到过（Folia 死代码）
+
+**这是本轮最有价值的一条教训，比上面所有判断方向都重要。**
+
+v1.4 首版实现完成后：`ServerBrandTest` 11 条 + `ServerBrandWiringMockBukkitTest` 3 条全绿，
+反向验证也全做了。看代码，`guardServerBrand()` 在 `onEnable` 第一行，Folia 分支会在
+`enable` 后立刻 `disablePlugin` 并打印三行中文原因——**逻辑无懈可击**。
+
+真机在 Folia 1.21.11-14 上跑，结果是：
+
+```
+[DirectoryProviderSource] Error loading plugin: Could not load plugin 'RadSurvival v1.0.0-SNAPSHOT'
+as it is not marked as supporting Folia!
+```
+
+**插件压根没被载入。** `onEnable` 一行都没跑。那个精心写的 Folia 分支是**死代码**。
+
+**为什么所有测试都没发现**：
+
+| 测试 | 它实际验证的 | 它验证不到的 |
+|---|---|---|
+| `ServerBrandTest` | `detect("Folia", probe)` 返回 `FOLIA` | 这个返回值**会不会被读到** |
+| `ServerBrandWiringMockBukkitTest` | 在 MockBukkit（Paper 语义）上插件正常启用 | Folia 的**加载阶段**拦截（MockBukkit 没有这层） |
+| 反向验证 | 改动会让**断言**变红 | 断言通过时**生产路径**是否可达 |
+
+三者都停在「函数返回值」这一层，而缺陷在「这个函数会不会被调用」——**测试没有覆盖的错误层级**。
+
+**根因**：Paper/Folia 在 `plugin.yml` 缺省 `folia-supported` 时，于 **provider 注册阶段**
+（类加载之前）直接拒绝。这与 Spigot 的失败形态**根本不同**——Spigot 会加载并执行 `onEnable`，
+只是随后抛 `NoClassDefFoundError`：
+
+| 分支 | 拒绝发生的位置 | `onEnable` 是否执行 |
+|---|---|---|
+| Spigot | 插件类内部（缺类） | ✅ 会执行，然后崩 |
+| Folia（未声明） | **provider 注册，早于类加载** | ❌ **完全不执行** |
+
+**同一个「防御分支」在两个服务端上的可达性完全不同**——这是设计时完全没想到的。
+
+**修复**：`plugin.yml` 增 `folia-supported: true`。注意这**不表示支持 Folia**，
+只是允许插件被载入，好让我们的提示接管发言权：
+
+```
+[RadSurvival] 检测到服务端 Folia（类探测），本插件无法在此运行，已自动禁用。
+[RadSurvival] 原因：Folia 使用区域化线程模型，全局调度器任务（主循环 / HUD / 露天异步补扫）在其上不可用。
+[RadSurvival] 请改用 Paper 1.21.11（或 Leaf / Purpur 等 Paper 分支）后重新挂载本插件。
+```
+
+复验：三条提示全部弹出；**同时重跑 Paper 与 Leaf，行为无任何变化**（确认该字段无副作用）。
+
+**推广到所有防御性代码**：凡是「检测到不支持 → 主动拒绝/降级」的逻辑，都要问一句
+**「服务端会不会在跑到我这行之前就把我拦掉」**。这类逻辑的共同特征是：
+它不是业务逻辑，而是**关于运行环境的断言**；而运行环境的某些行为（加载阶段拦截）
+发生在你的代码存在之前。MockBukkit 跑在 Paper 语义上，天然测不到别的分支的加载阶段行为。
+
+**取舍**：给一个明确不支持的分支加 `*-supported: true` 是反直觉的，容易被后来者当成错误
+「清理」掉。所以 `plugin.yml` 里写了足量注释说明「这个 true 是为了让提示生效，不是功能支持」。
+改它之前请先读 ACCEPTANCE §M.2。
+
+#### 10.8.2 Leaf 推翻了「类探测优先可以逐步取代名字匹配」
+
+实测 Leaf 179 时，`platform` 行是 `Leaf（server.getName()：getName=Leaf）`——走的是**名字匹配**，
+不是类探测。原因：Paper 系分支的 `damage` 类由 **paperclip 在启动时重映射/注入**，
+插件 `onEnable` 阶段的类加载器未必能 `Class.forName` 到 `DamageSource`。
+
+| 坑 | 事实 |
+|---|---|
+| **「主判据」不等于「唯一判据」** | 类探测优先是**容错**设计，不是「名字匹配可以删」。在走不到类探测的分支上，唯一名匹配（purpur/leaf/folia）是**唯一**能给出精确分支名的证据 |
+| **unknown 兜底因此是必需的** | 如果因为「类探测优先」就把名字匹配当成冗余删掉，所有走不到类探测的分支都会掉进 unknown；反过来如果把 unknown 也拒了，这些分支就全装不上。两者的存在互为前提 |
+| **识别来源必须展示** | `platform` 行输出「（类探测）」还是「（getName）」不是装饰——它让人一眼看出**这条识别结论有多可靠**。将来排查「为什么这个分支被判成 X」时，来源是第一个要看的信息 |
+
+#### 10.8.3 Spigot 与 Purpur：未实测就是未实测
+
+| 分支 | 状态 | 为什么没测 |
+|---|---|---|
+| **Spigot** | 仅隔离类加载验证 | 官方从不发布预编译 jar（需 BuildTools 自行构建），源码仓库对外返回 HTTP 451。改用**屏蔽 `DamageSource` 的受限 ClassLoader** 验证识别逻辑（`ServerBrandSpigotIsolatedTest`），但**明确不断言**「真 Spigot 上 `onEnable` 会执行到拒绝分支」——被 Folia 教训过之后，这种推断不该写成测试 |
+| **Purpur** | 未实测 | `purpurmc.org` 主站 / CI / Maven 仓库全部超时，二进制端点限速约 1.6 KB/s（52 MB 需 8.6 小时）。构建元数据可达但下载不可行 |
+
+**文档口径**：两者都保持「未实测」，不因「识别逻辑看起来对」就升级为「已验证」。
+ACCEPTANCE §M 与 ADVANCED §12.1 的支持矩阵表与此严格一致。
+补齐方法：在能访问对应下载源的机器上跑 `test-servers/run-smoke.ps1 -Server purpur`（脚本已备好）。
+
+**落地形态**：`core/ServerBrand`（纯 Java，不引用 Bukkit，`ClassProbe` 为注入点）
++ `RadSurvivalPlugin#guardServerBrand`（`onEnable` 首步）+ 启动日志 `平台 ·` 行
++ `/rad status` 的 `platform` 行 + `plugin.yml` 的 `folia-supported: true`。
+**未触碰**判定数学、`RadiationServices` 装配与 `ScanDispatcher` 注入点——原计划预估
+「涉及调度抽象」在「只做识别+防御」的范围下并不成立。
+
+**回归钉子**：`core/ServerBrandTest`(11)、`core/ServerBrandSpigotIsolatedTest`(3)、
+`mockbukkit/ServerBrandWiringMockBukkitTest`(3)。
+四项反向验证记录见 CHANGELOG v1.4.0「测试」节。
+
+**跨分支冒烟**：`test-servers/run-smoke.ps1`（每分支独立目录/端口/JVM，RCON 校验 `platform` 行）。
+结论见 ACCEPTANCE §M。**新增 Paper 分支支持声明前，先跑它。**
+
 ---
 
 ## 11. 后续方向（plan.md 文末候选）
-1. **§7 服务端品牌自适应 Profile**（Folia/Spigot 防御识别）——优先级最高，
-   涉及 `RadiationServices` 的调度抽象，需同步改 `ScanDispatcher` 注入点。
+1. ~~**§7 服务端品牌自适应 Profile**（Folia/Spigot 防御识别）~~ —— **v1.4 已完成「识别 + 防御」**；
+   仅「按品牌调参」（§7.3 三层优先级 / `profiles.<brand>`）仍缓建，见 plan.md §7.6。
+   重新引入的前提是拿到跨服务端实测差异，而非设计上的完整度。
 2. **§4.1 辐射病模式**——腐蚀阶段挂 Debuff，挂点在 `CorrosionMeter` 的阶段回调。
 3. **§4.2 防护装备体系**——建议以 `ProtectionProvider` SPI 接入，与 `ArmorCalculator` 并列。
 
@@ -741,7 +873,7 @@ static int columnScanStartY(int worldMinHeight) { return worldMinHeight - 1; }
 **当前状态**：M1–M4 完成并实机验收；命令层与日志优化已完成并验证；构建混淆已评估并
 **明确放弃**；v1.1 判定链路加固已完成；v1.2 护甲削弱 + 抗尘埃药已完成；
 v1.3 露天判定稳定性修复已完成；v1.3.1 全量缺陷排查（17 项）已完成；
-**v1.3.2 负 Y 露天判定漏判修复已完成（315 条测试全绿，实机复验通过）**；
+**v1.3.2 负 Y 露天判定漏判修复已完成**；**v1.4.0 品牌识别与防御分支已完成（332 条测试全绿）**；
 CI/CD 自动发行已上线（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
 **产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
@@ -752,9 +884,15 @@ GitHub Releases（唯一发布源）
 ```
 
 本地构建仍产出 `target/RadSurvival.jar`（版本号 `1.0.0-SNAPSHOT`），仅用于自测与实机冒烟。
-`test-server/` **不入库**（世界存档 + 明文凭据），验证脚本在 [tools/](tools/)。
+`test-server/`（单服验收）与 `test-servers/`（跨分支冒烟，v1.4 新增）都**不入库**，
+验证脚本在 [tools/](tools/) 与 [test-servers/](test-servers/)。
 
-**接手后第一件事**：跑一次 `mvn -B clean package` 确认 315 条全绿。
+**接手后第一件事**：跑一次 `mvn -B clean package` 确认 332 条全绿。
+
+> ⚠️ **必须用 JDK 21**：本机若默认 JDK 是 25，MockBukkit 的 127 条用例会以
+> `NullPointerException: No jar file selected` 全体报错（`MockBukkitConfiguredPluginClassLoader`
+> 走 ByteBuddy 反射注入，JDK 25 下类加载失败），**与代码无关**。
+> 跑法：`$env:JAVA_HOME="D:\java21"; mvn -B test`（或 `-Dmaven.compiler.release=21` 之外显式指定工具链）。
 
 > 文档改动不涉及代码，产物无需重建。
 
@@ -771,6 +909,7 @@ GitHub Releases（唯一发布源）
 | HUD/播报表述 | `feedback/HudRenderer`（纯函数，有单测）、`feedback/FeedbackService` |
 | 对外 API | `api/RadSurvivalApi`（只加方法不改签名，保持二进制兼容） |
 | 启动/重载日志 | `core/RadiationServices#describeFlags`（唯一口径来源，勿在别处拼配置摘要） |
+| 服务端品牌识别 / 支持矩阵 | `core/ServerBrand`（判定逻辑纯 Java，加分支只需动枚举与 `detect`；新用例进 `ServerBrandTest`）。**注意**：品牌**不参与任何数值决策**，不要为它加 `if (brand == …)` 分支到判定链路里 |
 
 **改代码前必读**：§3「三条口径」（先累后打 / 无敌帧 / 不双重减免）、§10 踩坑记录。
 这些是历史上出过真实故障的地方。
@@ -784,6 +923,13 @@ GitHub Releases（唯一发布源）
 - 不要在监听器里缓存 `plugin.services()`（reload 会换实例）。
 - 不要监听 `PlayerLoginEvent`（会禁用服务端 re-configuration API，见 §10.3）。
 - 不要在异步线程读方块/区块/玩家状态（会触发 Paper 线程断言）。
+- **不要删 `plugin.yml` 的 `folia-supported: true`**（v1.4）。它看起来是「声明支持 Folia」，
+  实际是为了让 Folia **先载入插件**、好让 `guardServerBrand()` 打出中文拒绝原因并自我禁用；
+  删掉它 Folia 会在加载阶段消失于一句英文报错里，我们的提示成为死代码（§10.8.1）。
+  同理：**不要给未知分支加 `*-supported: false` 式的「拒绝」**，那会让小众分支全装不上。
+- **不要因为「类探测优先」就删掉 `ServerBrand` 里的名字匹配**（§10.8.2）。
+  Leaf 等分支上 paperclip 重映射导致 `DamageSource` 在 `onEnable` 阶段探测不到，
+  名字匹配在那条路径上是**唯一**能给出精确分支名的证据。
 
 **待办候选**：见 §11（§7 品牌自适应 Profile 优先级最高）。
 
@@ -819,6 +965,9 @@ GitHub Releases（唯一发布源）
 | `SunRadiationListener` 的 `LongSupplier clock` | 时间窗判定 | 免 sleep 测窗口过期 |
 | `DustImmunity` 的 `LongSupplier clock`（v1.2） | 免疫窗口 | 免 sleep 精确测边界（`DustImmunityTest`） |
 | `CorrosionMeter` 阶段回调 | 阶段播报 | 记录/断言跨阈值 |
+| `ServerBrand.ClassProbe`（v1.4） | 「某个类在不在」 | 纯函数式注入，控制探测结果即可模拟任意分支；**不需要真服务端**。生产传 `ServerBrand#defaultProbe()` |
+| `ServerBrand` 的整类判定 `detect(name, probe)`（v1.4） | 分支识别 | 两个入参都是纯值，连 Bukkit 都不需要 |
+| 受限 `URLClassLoader`（v1.4，仅测试） | 「整条 classpath 少一个类」 | `ServerBrandSpigotIsolatedTest` 用屏蔽 `DamageSource` 的加载器模拟 Spigot；这是**测试侧**手法，生产无对应缝 |
 
 > 除这些缝之外，**过滤链 / 腐蚀步进 / 免疫短路 / 事件链 / 伤害全部走生产代码**——
 > 测试不是在测替身。加新缝时请守住这条，别把核心逻辑也 mock 掉。
@@ -921,9 +1070,15 @@ GitHub Releases（唯一发布源）
 | [README.md](README.md) | 玩家/服主 | 玩法、安装、命令、权限、FAQ | 任何 API 名、包名、测试细节 |
 | [ADVANCED.md](ADVANCED.md) | 进阶服主/插件作者 | 完整配置表、结算语义、API/事件、排错 | 内部实现细节、踩坑过程 |
 | **DEVELOPMENT.md**（本文） | 维护者 | 包结构、链路、测试、构建、**踩坑**、ADR | 面向玩家的玩法介绍 |
+| [PLATFORMS.md](PLATFORMS.md) | 维护者（跨分支验证时） | 跨服务端冒烟流程、各分支期望值、排查清单 | 通用开发约定（回本文） |
 | [CHANGELOG.md](CHANGELOG.md) | 所有人 | 每版的 Added/Changed/Fixed + **升级注意** | 设计意图、实现细节 |
 | [plan.md](plan.md) | 设计者 | 原始规格与需求 | 实现现状（会过时） |
 | [ACCEPTANCE.md](ACCEPTANCE.md) | 验收者 | 实机证据、裁决结论 | 设计意图 |
+
+> **PLATFORMS.md 为什么单独成文**：跨分支验证是一套**可重复的操作流程**（备 jar →
+> 起服 → 读 RCON → 判读三类结局），与本文「怎么改代码」的关注点不同；
+> 且它同时服务排查（服主报「我在 X 分支上装不上」）与新增支持声明两种场景。
+> 踩坑**原因**仍记在本文 §10.8，那边只记**怎么跑、看什么**。
 
 > **发版时别忘了 CHANGELOG**：`CHANGELOG.md` 是唯一记录「这版玩家会感觉到什么变化」的地方，
 > 面向玩家的破坏性变更**必须**写进对应版本的「升级注意」，而不是只写在本文的踩坑表里。
@@ -937,14 +1092,38 @@ GitHub Releases（唯一发布源）
 4. 改了 CI 行为 → 同步 §10.2 与本表。
 5. **注释即需求**：凡是注释里写了「零累积 / 不消耗 / 退回原版 / 已清理」这类承诺，
    必须能在下一行代码里找到对应语句。写不出来的就从注释里删掉，别让它变成谎言（见 §10.5 ③）。
-   > 已知待清理的一处：`core/RadiationTask` 类注释仍写「减免 ≥ 1.0 完全免疫短路」，该分支已在
-   > v1.2 删除，注释属过时表述（行为以 §3 与 `RoundResult.IMMUNE` 的 javadoc 为准）。
+   > （已清理：`core/RadiationTask` 类注释曾写「减免 ≥ 1.0 完全免疫短路」，该分支在 v1.2 删除；
+   > v1.3.2 文档轮次已把注释改写为「**不存在**『减免 ≥ 1.0 → 完全免疫』的短路分支」，
+   > 与 §3 及 `RoundResult.IMMUNE` 的 javadoc 一致。此处留记录以免后来者反复「发现」同一问题。）
 6. **批量文本替换后要抽查**：全局换数字（测试条数、版本号）极易误伤端口/坐标/版本串，
    替换后 `grep` 一遍形似端口或坐标的结果（见 §10.5 ⑤）。
 7. **改缓存/判定逻辑 → 同步 §3.1 与 §10.6**，并在测试里覆盖「同一位置、参数变化」的维度
    （v1.3 的教训：固定参数的测试套件查不出键维度错误）。
-8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 315 条。改完测试务必同步本文 §8.4、
+8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 332 条。改完测试务必同步本文 §8.4、
    发布检查单、ADVANCED §2.3 与 ACCEPTANCE 对应小节——历史上这里就漂移过（265 vs 267）。
+9. **★ 写「已验证」时必须写明验证层级**（v1.4 新增）。同一个词在不同层级含义完全不同：
+
+   | 写法 | 含义 |
+   |---|---|
+   | 「单元测试覆盖」 | 只证明判定函数返回值正确 |
+   | 「集成测试通过」 | 证明在 **Paper 语义**的 MockBukkit 上路径可达 |
+   | 「已实测（版本号）」 | 在真实该分支上跑过，**可写「已验证」** |
+   | 「未实测」 | 靠推理或隔离手法，**不要**写成「已验证」 |
+
+   v1.4 曾把 `ServerBrand` 的 Folia 分支写成「已验证」，实际它在 Folia 上是死代码
+   （§10.8.1）。因此支持矩阵类表述（ADVANCED §12.1、ACCEPTANCE §M）**必须逐分支标注**
+   是否真机跑过，并带上版本号——「Leaf 1.21.11-179 已实测可加载」和「Leaf 理论可用」
+   是两句完全不同的话。
+10. **改了支持矩阵 → 三处同步**：`core/ServerBrand` 的枚举 / ADVANCED §12.1 表格 /
+    ACCEPTANCE §M。新增分支支持声明前，先跑 `test-servers/run-smoke.ps1`。
+
+> ⚠️ **统计口径的两个陷阱**（都实际踩过）：
+> 1. **JDK 版本**：必须用 **JDK 21**。本机默认 JDK 若是 25，`mockbukkit/` 的 127 条用例会
+>    全体报 `NullPointerException: No jar file selected`（见 §12），此时「全绿」是假象、
+>    「全红」也不是代码问题。
+> 2. **`@Nested` 的记账方式**：Surefire 把外层类记成 `Tests run: 0`，真正的条数在各
+>    `OuterClass$NestedClass.txt` 里（例如 `BugHuntRegressionTest` 自身 0 条，6 个内层共 9 条）。
+>    因此**不要**用「找 `Tests run: 0` 的类」判断测试丢失，要看总和。
 
 > **文档里的相对链接请检查锚点**：GitHub 把标题转锚点时**会去掉点号**，
 > `### 3.2 armor — 盔甲减免` → `#32-armor-盔甲减免`（不是 `#3-2-...`）。改标题后旧链接会失效。

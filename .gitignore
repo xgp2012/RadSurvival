@@ -8,6 +8,14 @@ dist/
 # 且含 rcon-pass.txt 与 offline 模式凭据 —— 一律不入库。
 test-server/
 
+# ------------------------------------------------------------------ 跨服务端冒烟测试（v1.4）
+# test-servers/ 下每个分支一个完整运行目录（jar + 世界存档 + 日志），
+# 单分支约 250~300 MB，合计近 1 GB —— 与 test-server/ 同理一律不入库。
+# 只保留脚本与模板：二者是可复现的验证资产，且体积极小。
+test-servers/*/
+!test-servers/run-smoke.ps1
+!test-servers/server.properties.template
+
 # ------------------------------------------------------------------ 密钥 / 凭据
 **/rcon-pass.txt
 *.pem

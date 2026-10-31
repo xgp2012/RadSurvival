@@ -22,7 +22,11 @@
 10. [构建混淆：已评估，不采用](#10-构建混淆已评估不采用)
 11. [MockBukkit 测试接线结论](#11-mockbukkit-测试接线结论)
 12. [已知限制与排错](#12-已知限制与排错)
+    - [12.1 服务端支持范围（v1.4 新增）](#121-服务端支持范围v14-新增)
 13. [里程碑状态](#13-里程碑状态)
+
+> **换服务端遇到问题？** 先看 [PLATFORMS.md](PLATFORMS.md)：那里有各分支的
+> 支持状态、期望日志、以及「装不上时按什么顺序排查」。
 
 ---
 
@@ -91,7 +95,7 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 > `-Plibraries-channel` 产 thin jar（111 KB），两者 plugin.yml 由构建 profile 自动切换。
 
 > **构建环境提示**：远程仓库偶发 socket 挂起（与代码无关，与 ProtocolLib/PAPI 同源问题）。
-> 依赖已齐时用 `mvn -o -B clean package` 离线构建（315 条测试离线全绿）。
+> 依赖已齐时用 `mvn -o -B clean package` 离线构建（332 条测试离线全绿）。
 
 > **依赖仓库实况（2026-10-18 实测）**：extendedclip→PAPI 2.12.3 pom/jar 可拉（极慢，~5–13KB/s）；
 > dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉但 jar 通道挂死——本地 `.m2` 已用**官方 GitHub Release
@@ -100,23 +104,27 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 
 ### 2.3 测试
 
-当前测试规模：**315 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
+当前测试规模：**332 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
 M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11 +
 v1.2 抗尘埃药与护甲削弱 43 + v1.3 露天判定稳定性 3 + **v1.3.1 全量缺陷排查 42** +
-**v1.3.2 负 Y 露天判定 5**；
+**v1.3.2 负 Y 露天判定 5** + **v1.4.0 品牌识别与防御 14 + 隔离类加载 3**；
 `com.ft.radsurvival.mockbukkit` 与 `com.ft.radsurvival.listener` 包），无跳过项。
+
+> ⚠️ **跑测试必须用 JDK 21**。若系统默认 JDK 是 25，`mockbukkit` 包的 127 条用例会全体报
+> `NullPointerException: No jar file selected`——这是 MockBukkit 的类加载与 JDK 25 反射封装
+> 不兼容，**与插件代码无关**。指定方式：`$env:JAVA_HOME='D:\java21'` 后再 `mvn`。
 
 按包实测分布（`mvn -B clean package` 的 Surefire 汇总）：
 
 | 包 | 条数 |
 |---|---|
-| `mockbukkit`（集成，走生产代码路径） | 138 |
-| `core`（纯内核） | 85 |
+| `mockbukkit`（集成，走生产代码路径） | 141 |
+| `core`（纯内核） | 99 |
 | `config`（纯 Java 校验） | 60 |
 | `command`（渲染与路由） | 13 |
 | `feedback`（纯字符串渲染） | 11 |
 | `listener`（伤害通道归因） | 8 |
-| **合计** | **315** |
+| **合计** | **332** |
 
 v1.3 新增（露天判定稳定性，均做过反向验证）：
 
@@ -583,10 +591,44 @@ tick-interval（≥20 全局任务）
 | **头顶看着是天空却仍掉血（v1.3 后）** | 先 `/rad status <玩家>` 看该轮判定。若判定为露天，说明列内确实有方块算遮蔽以外的判定成立；v1.3 已消除「判定抖动 / 无方块处掉血」。注意树叶、藤蔓、半砖、地毯、雪层、脚手架都可能算遮蔽 |
 | **判定时有时无 / 进门出门掉血不稳（v1.3 前）** | 已知缺陷，v1.3 已修复（缓存键含高度段导致同列结果互相覆盖）。升级 jar 即可，无需改配置 |
 | **站桩显示安全，跳一下就掉血（v1.3 前）** | 同上：跨 16 格段界换键重扫导致。v1.3 起一列只扫一次，与眼高无关 |
+| **日志出现「检测到服务端 Spigot…，本插件无法在此运行」** | v1.4 起的主动拒绝（见 §12.1）。换 Paper 系服务端即可；这不是配置问题 |
+| **日志出现「检测到服务端 Folia…」** | v1.4 起的主动拒绝（见 §12.1）。本插件依赖全局调度器，未做区域化改造 |
+| **想知道当前跑在什么分支上** | 启动日志 `平台 ·` 行，或 `/rad status` 的 `platform` 行；两者都带识别来源（类探测 / getName / 兜底） |
+
+### 12.1 服务端支持范围（v1.4 新增）
+
+插件在 `onEnable` **最前面**识别服务端分支，并对无法承载本实现的分支**主动拒绝加载**
+（而不是让异常自然抛出）。
+
+| 分支 | 状态 | 依据 |
+|---|---|---|
+| **Paper 1.21.11** | ✅ 已实测（132） | M4/§G–§L 全部验收在此完成；v1.4 冒烟复测通过 |
+| **Leaf 1.21.11** | ✅ 已实测可加载（179） | v1.4 冒烟：正常启用、7 监听器、`platform` 识别为 `Leaf（getName）`。**未做完整玩法验收** |
+| **Purpur 1.21.11** | ⚠️ 理论可用，**未实测** | 下载源在本网络不可达（build 元数据可达、二进制端点超时）。识别逻辑与 Leaf 同路径 |
+| **其他 Paper 分支** | ⚠️ 显示为「未知分支」并照常加载 | 日志追加「未实测分支，如遇问题请附本行」 |
+| **Spigot** | ❌ 拒绝加载（**未实测**，仅隔离类加载验证） | 以 paper-api 编译，缺 `DamageSource`/`Component` 等类。真 Spigot 无法获取（官方不发预编译 jar） |
+| **Folia 1.21.11** | ❌ 拒绝加载（✅ 已实测，14） | 区域化线程模型：`BukkitScheduler` 的**全局任务**在其上抛 `UnsupportedOperationException`，而主循环 / HUD / 露天异步补扫全部依赖全局调度 |
+
+识别以**类存在性为准**，`getName()` 只作补充（它可被分支服务端改写）：
+`RegionizedServer` 存在 → Folia；名字含 purpur/leaf → 对应分支；
+`org.bukkit.damage.DamageSource` 可加载 → Paper；名字含 spigot 且探测阴性 → Spigot；否则 unknown。
+**品牌不参与任何数值决策**——伤害公式、判定链路、配置默认值在任何分支上完全相同，
+`/rad status` 的 `platform` 行只报「你是谁」，不改「怎么算」。
+
+> **v1.4 实测的一个反直觉结论**：Leaf 上走的是 `getName()` 匹配而非 `DamageSource` 类探测——
+> Paper 系分支的 damage 类由 paperclip 在启动时重映射/注入，插件 `onEnable` 阶段的类加载器
+> 未必能 `Class.forName` 到。因此「类探测优先」是**容错设计**，不是「name 匹配可删」的理由：
+> 在走不到类探测的分支上，唯一名匹配是**唯一**能给出精确分支名的证据。详见 ACCEPTANCE §M.3。
+>
+> **Folia 的 `plugin.yml` 需 `folia-supported: true` 才能让我们的提示生效**：缺省该字段时
+> Folia 在插件加载阶段就拒绝，`onEnable` 一行都跑不到，识别与提示成为死代码。
+> 该字段**不代表支持 Folia**，只代表把拒绝的发言权交给插件（以便给出中文原因）。见 ACCEPTANCE §M.2。
 
 **实机验收环境**：`test-server/`（Paper 1.21.11-132、离线模式、RCON 25764、superflat）**不入库**
 （含世界存档与明文凭据）。验证脚本见 [tools/](tools/)（RCON 客户端、日志读取、最小协议客户端），
 启动方式与 17 项人工验收清单见 [ACCEPTANCE.md](ACCEPTANCE.md) §D。
+跨分支冒烟脚本见 [test-servers/run-smoke.ps1](test-servers/run-smoke.ps1)，
+操作手册见 **[PLATFORMS.md](PLATFORMS.md)**，结论见 ACCEPTANCE §M。
 
 ---
 
@@ -625,4 +667,20 @@ tick-interval（≥20 全局任务）
     冷启动同步直算、透明方块口径、维度豁免。
   - **测试**：265 → 268（`verticalMovementDoesNotRescanOrFlip`、`columnScanCoversBelowEyeHeight`、
     `cacheEntriesAreColumnScoped`），三条均做过反向验证。
+  - **升级**：`config.yml` 无任何变更，直接覆盖 jar 即可。
+- **v1.4 ✅（本期）**：服务端品牌识别与防御分支（332 条测试全绿）。
+  - **实施范围**：只做 plan.md §7 的**识别 + 防御**。`paper/leaf/purpur/spigot/folia/unknown`
+    归一化 + 识别来源记录（启动日志 `平台 ·` 行、`/rad status` 的 `platform` 行）；
+    Spigot / Folia 在 `onEnable` 首步拒绝加载并给出中文原因。
+  - **明确未做**：按品牌调参（`adaptive-profile`、`profiles.<brand>`、三层优先级、
+    Configurate presence 检测）。理由见 plan.md §7.6——唯一随品牌变化的维度是主线程压力
+    特征，而本插件主线程稳态已近零开销，无实测数据就按品牌改旋钮是负收益。
+  - **未改**：任何玩法数值、判定链路、既有配置键、`RadiationServices` 装配、
+    `ScanDispatcher` 注入点。Paper/Leaf 上**玩法行为完全不变**。
+  - **跨分支实测**：Paper 132 ✅、Leaf 179 ✅、Folia 14 ✅（拒绝分支生效）、
+    Purpur 未实测（下载源不可达）、Spigot 未实测（仅隔离类加载验证）。详见 §12.1 与 ACCEPTANCE §M。
+  - **`plugin.yml` 增 `folia-supported: true`**：不是功能声明，是为了让拒绝提示能真正执行
+    （缺省时 Folia 在加载阶段就拒载，`onEnable` 跑不到）。Paper/Leaf 上复验无副作用。
+  - **测试**：315 → 332（`ServerBrandTest` 11 + `ServerBrandWiringMockBukkitTest` 3 +
+    `ServerBrandSpigotIsolatedTest` 3），反向验证共 4 项，记录见 [CHANGELOG.md](CHANGELOG.md) v1.4.0。
   - **升级**：`config.yml` 无任何变更，直接覆盖 jar 即可。

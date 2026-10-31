@@ -263,6 +263,7 @@ Windows 控制台是 GBK 编码，插件输出 UTF-8。这只影响控制台显�
 | 开发联动插件 / 读占位符 | **[ADVANCED.md](ADVANCED.md#7-对外-api-与事件)** |
 | 自己编译 | **[ADVANCED.md](ADVANCED.md#2-部署与构建)** |
 | 改代码、跑测试、加功能 | **[DEVELOPMENT.md](DEVELOPMENT.md)** |
+| 换服务端 / 排查「在我这装不上」 | **[PLATFORMS.md](PLATFORMS.md)** — 各分支支持状态与判读 |
 | 看设计决策的来龙去脉 | [plan.md](plan.md) |
 | 看实机验收证据 | [ACCEPTANCE.md](ACCEPTANCE.md) |
 
@@ -272,12 +273,13 @@ Windows 控制台是 GBK 编码，插件输出 UTF-8。这只影响控制台显�
 
 | 项 | 值 |
 |---|---|
-| 平台 | Paper 1.21.11（`api-version: 1.21`） |
-| Java | 21+ |
+| 平台 | Paper 1.21.11（`api-version: 1.21`）；Leaf/Purpur 为 Paper 分支，理论可用但未实测 |
+| 不支持 | **Spigot**、**Folia**——插件会识别并主动拒绝加载并说明原因（不会静默不工作） |
+| Java | 21（构建与运行**都须 JDK 21**） |
 | 依赖 | 无（ProtocolLib / PlaceholderAPI 可选） |
 | 大小 | 约 1.8 MB（自包含，内嵌库已重定位） |
 | NMS | 不使用 |
-| 测试 | 315 条自动化测试 |
+| 测试 | 332 条自动化测试 |
 
 每次推送到主分支都会自动构建并跑完整测试，发布前还有门禁——测试数量异常会直接中止发布，
 避免坏包流出去。构建产物命名格式是 `RadSurvival-<年>-<月>-<日>-<当天第几次构建>.jar`，

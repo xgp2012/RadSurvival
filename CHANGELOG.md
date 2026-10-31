@@ -4,11 +4,108 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 > **阅读提示**：破坏性变更（升级后旧配置/旧玩法会变）集中在
-> [v1.2.0 的「升级注意」](#升级注意v11--v12) 一节，升级前请先看那一节。
+> [v1.2.0 的「升级注意」](#升级注意v11-v12) 一节，升级前请先看那一节。
 
 ---
 
 ## [未发布]
+
+### v1.4.0 — 服务端品牌自适应 Profile：识别与防御（待发版）
+
+> 落地 [plan.md](plan.md) §7 的**识别 + 防御**部分，并按实施决策**缓建**按品牌调参的
+> 预设体系（原因见下「未实施」）。功能上对既有 Paper 服**零行为变化**：
+> 数值公式、判定链路、三条口径、配置键全部未动，`/rad status` 与启动日志各多一行信息。
+
+#### 新增
+
+- **服务端品牌识别**（`core/ServerBrand`）：归一化为
+  `paper / leaf / purpur / spigot / folia / unknown`，并记录**识别来源**
+  （类探测 / `server.getName()` / 兜底），随启动日志与 `/rad status` 的 `platform`
+  行展示。识别为纯 Java（只接受 `String` 与 `ClassProbe`），不依赖 Bukkit，
+  因此可脱离服务端做单元测试。
+
+  **判定顺序即安全性排序**——先判「跑不跑得起来」，再判「是不是某分支」：
+
+  | 顺序 | 判定 | 依据 | 结果 |
+  |---|---|---|---|
+  | ① | Folia | `RegionizedServer` 类存在 | **拒绝加载** |
+  | ② | Purpur / Leaf / Folia | `getName()` 唯一命中（这些名字不会被别的分支占用） | 按识别结果 |
+  | ③ | Paper | `org.bukkit.damage.DamageSource` 可加载（= 本插件的实际编译依赖） | 放行 |
+  | ④ | Spigot | `getName()` 含 `spigot` 且类探测阴性 | **拒绝加载** |
+  | ⑤ | unknown | 兜底 | 放行但明确标注「未实测分支」 |
+
+- **防御分支**（`RadSurvivalPlugin#guardServerBrand`，在 `onEnable` **最前面**，
+  先于 `saveDefaultConfig()` 与一切 Paper API 调用）：
+  - **Spigot**：`paper-api` 专属类（`DamageSource`/`Component`）缺失会让 `onEnable` 抛
+    `NoClassDefFoundError`，且抛出点常在类初始化期间，管理员从堆栈里看不出「换服务端」
+    才是解法。现在改为启动首步就给出确定结论 + 中文指引，然后 `disablePlugin`。
+  - **Folia**：`BukkitScheduler` 的**全局任务**在 Folia 上直接抛
+    `UnsupportedOperationException`，而本插件的主循环 / HUD / 露天异步补扫全部依赖全局
+    调度。继续加载只会得到「启动成功但完全不工作」的假象，比拒绝加载更难排查，
+    故一并拒绝（plan.md §7.2 原写「WARNING + 禁用」，实施时明确为**不继续启用**）。
+  - **unknown**：按 Paper 同面 API 放行，日志追加「未实测分支，如遇问题请附本行」。
+    **绝不对未实测分支拒绝加载**——那样每个小众分支都装不上，收益为负。
+
+- **`plugin.yml` 新增 `folia-supported: true`**（v1.4 跨分支实测驱动）。
+  **这不是「支持 Folia」的声明**，而是让我们的拒绝提示**能真的弹出来**：
+  缺省该字段时，Folia 在**插件加载阶段**（类尚未载入）就拒绝，报一句英文
+  `not marked as supporting Folia`，`guardServerBrand()` 的 FOLIA 分支成了**死代码**
+  ——这是 MockBukkit 单测无法发现的（它只验证识别函数返回值，验证不了那段代码是否可达）。
+  声明后插件被载入、识别、打印中文原因并自我禁用。验证记录见 ACCEPTANCE §M.2。
+
+#### 跨服务端实测（v1.4.0）
+
+| 分支 | 版本 | 结果 |
+|---|---|---|
+| Paper | 1.21.11-132 | ✅ 正常启用，`platform` 行 = `Paper（类探测）` |
+| Leaf | 1.21.11-179 | ✅ 正常启用，`platform` 行 = `Leaf（server.getName()）` |
+| Folia | 1.21.11-14 | ✅ 拒绝加载 + 三条中文提示 |
+| Purpur | 1.21.11-2568 | ⚠️ 下载源不可达，**未实测** |
+
+实测脚本与结论见 [test-servers/run-smoke.ps1](test-servers/run-smoke.ps1) 与
+[ACCEPTANCE.md](ACCEPTANCE.md) §M。**Purpur 仍为「理论可用、未实测」**，不因本次
+改动升级为「已验证」。
+
+#### 未实施（有意缓建，非遗漏）
+
+- `adaptive-profile: auto|off|<brand>` 配置键、`profiles.<brand>` 预设段、
+  「用户显式值 > 品牌 profile > 内置默认」三层优先级、Configurate 节点 presence 检测
+  ——**整体不做**。plan.md §7.2 的边界表里，唯一随品牌变化的维度是**主线程压力特征**，
+  而本项目 M2 后主线程稳态已近零开销（露天补扫走异步池）。在没有任何跨服务端实测数据
+  的前提下按品牌改 `tick-interval` / 缓存 TTL / HUD 频率，等于拿实测数据换猜测，
+  且会引入「同一份 config.yml 在不同服务端生效值不同」的困惑。
+- 恢复条件：确有服务端侧实测差异（例如某分支上异步补扫显著更慢）时，再引入最小配置段，
+  并按 §7.5「每个 profile 视为一次支持矩阵声明」跑完整回归。
+
+#### 测试
+
+- 新增 `ServerBrandTest`(11)：Paper/Leaf/Purpur 放行、Folia 类优先于 `getName`、
+  Folia 与 `DamageSource` 并存时仍判 Folia、Spigot 拒绝、Spigot 若能加载 Paper 类则不误拒、
+  unknown 放行、`getName` 为 null/空串/空白不抛异常、`describe()` 不伪造 Paper、
+  大小写与空白不敏感、生产探测器对 `DamageSource` 的真实存活。
+- 新增 `ServerBrandWiringMockBukkitTest`(3)：正常服务端不被误杀、`brand` 在 `onEnable`
+  写入、reload 后 `brand` 保持不变。
+- 新增 `ServerBrandSpigotIsolatedTest`(3)：用**屏蔽 `DamageSource` 的受限 ClassLoader**
+  模拟 Spigot（官方不发预编译 jar，真机不可得），验证「类不可加载 → SPIGOT + 拒绝」，
+  并附两条防误伤断言：未知名分支仍放行、`getName` 自称 Paper 但探测为阴时不得谎报支持。
+  **本类明确不验证**「真 Spigot 上 `onEnable` 会执行到拒绝分支」——那是关于 Spigot 行为的推断。
+- **反向验证**（四项，均确认「改坏 → 变红」）：
+  1. 去掉 Folia 类探测优先判断 → `foliaWinsOverPaperClass` 与
+     `foliaDetectedByClassEvenIfNameSaysPaper` 两条变红；
+  2. `defaultProbe()` 改为恒 `false` → `defaultProbeFindsPaperClassAtTestRuntime` 变红；
+  3. `UNKNOWN` 改为不可运行 → `unknownIsTreatedAsRunnable` 变红；
+  4. 受限 ClassLoader 的屏蔽条件改为永不命中 → `ServerBrandSpigotIsolatedTest` 3 条全红。
+- 测试总数 315 → **332**，全绿（`332 tests, 0 failures, 0 errors, 0 skipped`）。
+
+#### 升级注意（v1.3.x → v1.4.0）
+
+- **无需改配置**：未新增/未删除任何配置键。
+- **纯 Spigot 服**：此前是「启动时报 `NoClassDefFoundError` 堆栈」，现在是
+  「明确的中文拒绝加载提示」。行为方向一致（都跑不起来），只是提示变可读。
+- **Folia 服**：此前是「启用后主循环抛 `UnsupportedOperationException`」，现在是启动即拒绝。
+- **Paper / Leaf / Purpur 服**：无变化。启动日志多一行 `平台 · Paper（类探测）`。
+
+---
 
 ### v1.3.1 — 全量缺陷排查修复（待发版）
 

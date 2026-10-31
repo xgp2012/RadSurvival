@@ -4,6 +4,16 @@ version: ${project.version}
 main: com.ft.radsurvival.RadSurvivalPlugin
 api-version: '1.21'
 
+# Folia 支持声明（v1.4）。这里写 true 是为了「让拒绝提示真的能弹出来」：
+#   若省略此字段，Paper/Folia 在**插件加载阶段**（类都还没加载时）就直接拒绝，
+#   报一句英文 "not marked as supporting Folia"，我们的 onEnable 一个字都跑不到——
+#   core/ServerBrand 的 FOLIA 分支就成了死代码（v1.4 跨分支实测发现，见 ACCEPTANCE §M）。
+#   声明 true 后插件会被载入，guardServerBrand() 立刻识别 Folia 并打印中文原因 + 换端指引，
+#   然后自我禁用。也就是说：**这个 true 不代表功能支持 Folia，只代表允许我们的提示接管。**
+#   真正的支持需要把全局调度换成区域化调度（FoliaScheduler / getRegionScheduler），
+#   本插件依赖全局任务做主循环/HUD/异步补扫，未改造，故仍必须拒绝。
+folia-supported: true
+
 # 默认构建为自包含 fat jar：caffeine/configurate 已重定位内嵌（com.ft.radsurvival.lib.*），
 # 故此处不声明 libraries:（Paper 启动时强解析该字段，本环境 Central 镜像不可达会导致插件拒载）。
 # 需要 plan.md §5.1 的 libraries 通道时改用：

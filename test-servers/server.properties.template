@@ -1,0 +1,54 @@
+# RadSurvival 跨服务端极简冒烟测试 —— 共用 server.properties
+# 目标不是完整验收（那是 ACCEPTANCE.md §D 的 17 项手册），而是回答一个问题：
+#   「这个分支上插件到底能不能加载、识别对不对、主循环跑不跑得动、伤害落不落地」
+#
+# 关键取舍：
+#   - level-type=flat + generate-structures=false → 世界极小、生成秒级完成、无地形噪声
+#   - view-distance/simulation-distance=4        → 内存占用最低，-Xmx768M 够用
+#   - online-mode=false                          → 无需正版账号即可进服
+#   - rcon 每服端口不同，由一个统一的 run-smoke.ps1 覆盖
+accepts-transfers=false
+allow-flight=false
+broadcast-console-to-ops=true
+difficulty=easy
+enable-command-block=false
+enable-jmx-monitoring=false
+enable-query=false
+enable-rcon=true
+enable-status=true
+enforce-secure-profile=false
+enforce-whitelist=false
+entity-broadcast-range-percentage=50
+gamemode=survival
+generate-structures=false
+generator-settings={}
+hardcore=false
+hide-online-players=false
+level-name=world
+level-seed=12345
+level-type=minecraft\:flat
+log-ips=false
+max-players=5
+max-tick-time=120000
+motd=RadSurvival cross-brand smoke
+network-compression-threshold=256
+online-mode=false
+op-permission-level=4
+player-idle-timeout=0
+prevent-proxy-connections=false
+query.port=0
+rate-limit=0
+require-resource-pack=false
+# 以下三行由 run-smoke.ps1 按服务端覆写；必须存在于模板，否则 -replace 会静默失效、
+# 服务端回落到默认 25565/25575，导致 RCON 探测连错端口（一度误判为「未就绪」）
+server-ip=127.0.0.1
+server-port=25570
+rcon.port=25770
+rcon.password=override-me
+simulation-distance=4
+spawn-monsters=false
+spawn-protection=0
+sync-chunk-writes=false
+use-native-transport=true
+view-distance=4
+white-list=false
