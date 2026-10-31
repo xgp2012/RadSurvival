@@ -8,7 +8,7 @@
 
 | 项 | 结论 | 证据位置 |
 |---|---|---|
-| 全量构建与测试 | ✅ **265 条测试，0 失败 0 错误 0 跳过**（v1.1 时为 188 条，v1.2 增至 265，v1.3 增至 268 — 见 §K） | §A、§J.1、§K |
+| 全量构建与测试 | ✅ **315 条测试，0 失败 0 错误 0 跳过**（v1.1 时 188 → v1.2 265 → v1.3 268 → v1.3.1 310 → v1.3.2 **315** — 见 §K、§L） | §A、§J.1、§K、§L.2 |
 | 插件实机加载 | ✅ 启用成功、零异常、零 libraries 下载 | §B.1 |
 | `libraries:` 通道风险 | ⚠️ **本环境不可用（Connection reset）→ 已切默认 shade+relocate，thin 通道保留可切换** | §B.2 |
 | 配置生成与校验 | ✅ 与仓库默认逐字节一致；坏配置 reload 拒载并保留旧配置 | §B.3–B.4 |
@@ -17,6 +17,7 @@
 | 无敌帧（每轮真实掉血） | ⏳ console `/damage` 绕过无敌帧，无法在无客户端条件下验证；移交 §D 手册（含 tick-interval=24 预案） | §C.2 |
 | 玩家相关验收（HUD/播报/腐蚀保留/预算表计时等） | ✅ 已用真实 1.21.11 客户端跑通关键链路（露天结算、腐蚀累加、死亡文案、reload 续接）；逐项秒表计时仍可照 §D 复跑 | §D |
 | **v1.2 护甲削弱 + 抗尘埃药**（265 条测试） | ✅ 构建/启动/命令/世界结构全通过；交互类（木棍右键、GUI 点击、服药动画）由 MockBukkit 生产路径覆盖，建议上线前手工复跑 | §J |
+| **v1.3.2 负 Y 露天判定**（315 条测试） | ✅ **真实客户端实机复验通过**：修复前报「遮蔽安全」，修复后报「露天」并正常累积腐蚀/结算伤害；上表四项数值全部逐位吻合 | §L |
 
 ## A. 全量构建与测试
 
@@ -32,6 +33,10 @@ $env:JAVA_HOME='D:\java21'; mvn -B clean package
 - 自包含核验：jar 内 `com/ft/radsurvival/lib/*` 条目 1,258 个；`org/spongepowered/*` 与 `com/github/benmanes/*` **零泄漏**（全部重定位）；`META-INF/services/com.ft.radsurvival.lib.configurate.loader.ConfigurationFormat` 已随重定位改写。
 - `-Plibraries-channel` 变体验证：111,678 B thin jar，`libraries:` 块存在、无 lib 类内嵌（plan.md §5.1 通道保留，一键切换）。
 - 环境：JDK 21（Azul Zulu 21.0.12.1，`D:\java21`）、Maven 3.10.0、paper-api 1.21.11-R0.1-SNAPSHOT。
+
+> 上为**首轮验收（v1.1 时期）**的历史快照，保留以对照。最新全量结果为
+> **`Tests run: 315, Failures: 0, Errors: 0, Skipped: 0`**（v1.3.2，见 §L.2）；
+> 各版本测试规模演进 188 → 265 → 268 → 310 → **315**。
 
 ## B. 实机冒烟（Paper 1.21.11 build 132，offline + RCON）
 
@@ -464,5 +469,94 @@ v1.1 基线 188 条 → v1.2 **265 条**（+67）。新增四个测试类共 43 
 
 > 判定抖动是**概率性**症状（依赖玩家眼高与段界的关系），实机只是辅助观察；
 > 真正的判据是 §K.2 的三条回归测试。
+
+---
+
+## L. v1.3.2 验收：负 Y 露天判定漏判（**真实客户端实机验收**）
+
+> 验收日期：2026-10-31（Asia/Shanghai）
+> 环境：Paper 1.21.11 build 132（`test-server/`，offline、RCON 25764、`-Xmx1G`）
+> ＋ **原版 1.21.11 客户端**（`D:\hmcl\.minecraft\versions\test`，protocol 774，非 Fabric）。
+> 性质：**判定缺陷修复**，无配置变更、无玩法数值变更。
+>
+> 本轮的意义：这是第一次用**真实客户端**跑完整交互链路，也是 §D / §J.5 遗留
+> 「需真实客户端」项的首次闭环尝试。缺陷正是**只有实机才能暴露**的那一类。
+
+### L.1 缺陷与修复
+
+**现象**：玩家站在 y=-60 的地下竖井底部，`execute if block` 逐层探针确认头顶
+y=-59…319 **全是空气**，`/rad status` 却报「遮蔽/豁免维度（安全）」，白天一滴血不掉。
+
+**根因**：`SunExposureChecker` 把列扫描下界写死为 `MIN_BUILD_HEIGHT(0) - 1 = -1`，
+注释理由「1.21 世界 y 从 -64 起，0 已在其上」**混淆了方块层与可站立高度**。
+1.21 主世界 y 范围是 **-64..319**，负 Y 是深板岩层/矿洞/竖井/正常可玩区域；
+扫描停在 -1 意味着 `[-64,-1]` 的方块从未被读过 → 无遮挡列返回哨兵 `-2` →
+判据 `eyeY > topCover` 即 `-60 > -2` 为假 → 判「遮蔽」。方向上属**漏判危险**。
+
+**修复**：扫描下界改由世界驱动，`columnScanStartY(worldMinHeight) == worldMinHeight - 1`；
+适配层传 `world.getMinHeight()`。旧无参重载保留为 `@Deprecated` 的纯内核默认值。
+
+### L.2 构建与测试
+
+```
+[INFO] Tests run: 315, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+- 基线 v1.3.1 的 310 条 → **315 条**（+5，见 `core/NegativeYExposureRegressionTest`）。
+- 顺带把 `SunExposureCheckerTest` 里 4 处写死 `(0 - 1)` 的扫描格数断言改为
+  `columnScanStartY(MIN_HEIGHT)` 派生，避免把错误下界固化成「期望值」。
+
+### L.3 反向验证（本仓库硬性要求）
+
+把 `columnScanStartY` 临时改回返回 `-1` 后重跑：
+
+```
+[ERROR] Tests run: 5, Failures: 3, Errors: 0, Skipped: 0
+[ERROR]   NegativeYExposureRegressionTest.exposedAtNegativeY
+[ERROR]   NegativeYExposureRegressionTest.exposedAtWorldBottom
+[ERROR]   NegativeYExposureRegressionTest.scanStartFollowsWorldMinHeight
+```
+
+3 条负 Y 用例变红，**正 Y 对照 `exposedAtPositiveY` 仍绿**——钉住的是缺陷本身，
+不是顺手写出来的同义反复。还原后 5 条全绿。
+
+### L.4 实机复验（同一位置，前后对比）
+
+| 观测项 | 修复前 | 修复后 |
+|---|---|---|
+| `/rad status` 露天判定 | 遮蔽/豁免维度（安全） | **露天（头顶可见天空）** |
+| 腐蚀累积 | 冻结不动 | 9% → 100% 持续上涨 |
+| 本轮伤害 | `0.000`（遮蔽不受伤） | **`1.860`** = base 1.0 × timeFactor 1.0 × 腐蚀倍率 1.86 |
+
+### L.5 其余机制实机数值复核
+
+所有数值均手工按公式核对，逐位吻合：
+
+| 场景 | 配置/状态 | 期望公式 | 实测 | 结论 |
+|---|---|---|---|---|
+| 夜晚裸装 | timeFactor 0.500、腐蚀 27%（×1.27） | `1 × 0.5 × 1.27 = 0.635` | `0.635` | ✅ |
+| 白天满腐蚀裸装 | timeFactor 1.000、腐蚀 100%（×2.0） | `1 × 1.0 × 2.0 = 2.000` | `2.000` | ✅ |
+| 黄昏裸装 | timeFactor 0.837、×2.0 | `1 × 0.837 × 2.0 = 1.674` | `1.674` | ✅ |
+| 全套下界合金 | 减免 **72%**、黄昏、×2.0 | `1 × 0.837 × 2.0 × 0.28 = 0.468` | `0.468` | ✅ |
+
+- **腐蚀累积速率**：白天露天约 +1%/s，与 `corrosion.day-accum-per-sec: 1.0` 一致。
+- **遮蔽回落**：进入遮蔽后按 `regen-per-sec` 每秒 −1% 回落（实测 27→18→9→0）。
+- **真实掉血**：裸装露天采样 `20.0 → 19.52 → 18.77 → 18.59`，与自然回血竞争可见。
+- **死亡清零**：`reset-on-death: true` 生效，死后腐蚀由 100% 归零后重新累积。
+- **PDC 持久化**：解压 `world/playerdata/<uuid>.dat` 得 `radsurvival:corrosion`（DOUBLE），
+  断线重连后腐蚀值完整恢复 100%。
+- **reload**：连续 5 次 `/rad reload` 全部成功，玩家数据经 PDC 无缝续接，无异常、无泄漏。
+- **稳定性**：全程 TPS `19.9 / 20.0 / 20.0`，插件**零** WARN/ERROR。
+
+### L.6 客户端限制（非插件缺陷）
+
+本机客户端渲染线程受内存约束（`-Xmx512M~700M`，宿主 7.9 GB 仅余约 1 GB）偶发冻结，
+表现为：`tp` 命令回报成功但 `data get entity` 位置不更新、死亡后不发送重生请求。
+这是**采集端问题**，与服务端逻辑无关；已通过「服务端侧推导 + 换新玩家会话」绕开。
+
+> 因此下列仍**建议上线前手工复跑**（§J.5 遗留项，本轮未闭环）：
+> 木棍右键铁砧的真实触发、GUI 点击/拖拽约束、服药后的动作与音效。
+> 这三项的 MockBukkit 覆盖仍然有效，但真实客户端交互本轮没能完整跑到。
 
 

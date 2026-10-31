@@ -91,7 +91,7 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 > `-Plibraries-channel` 产 thin jar（111 KB），两者 plugin.yml 由构建 profile 自动切换。
 
 > **构建环境提示**：远程仓库偶发 socket 挂起（与代码无关，与 ProtocolLib/PAPI 同源问题）。
-> 依赖已齐时用 `mvn -o -B clean package` 离线构建（268 条测试离线全绿）。
+> 依赖已齐时用 `mvn -o -B clean package` 离线构建（315 条测试离线全绿）。
 
 > **依赖仓库实况（2026-10-18 实测）**：extendedclip→PAPI 2.12.3 pom/jar 可拉（极慢，~5–13KB/s）；
 > dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉但 jar 通道挂死——本地 `.m2` 已用**官方 GitHub Release
@@ -100,10 +100,23 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 
 ### 2.3 测试
 
-当前测试规模：**268 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
+当前测试规模：**315 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
 M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11 +
-v1.2 抗尘埃药与护甲削弱 43 + **v1.3 露天判定稳定性 3**；
+v1.2 抗尘埃药与护甲削弱 43 + v1.3 露天判定稳定性 3 + **v1.3.1 全量缺陷排查 42** +
+**v1.3.2 负 Y 露天判定 5**；
 `com.ft.radsurvival.mockbukkit` 与 `com.ft.radsurvival.listener` 包），无跳过项。
+
+按包实测分布（`mvn -B clean package` 的 Surefire 汇总）：
+
+| 包 | 条数 |
+|---|---|
+| `mockbukkit`（集成，走生产代码路径） | 138 |
+| `core`（纯内核） | 85 |
+| `config`（纯 Java 校验） | 60 |
+| `command`（渲染与路由） | 13 |
+| `feedback`（纯字符串渲染） | 11 |
+| `listener`（伤害通道归因） | 8 |
+| **合计** | **315** |
 
 v1.3 新增（露天判定稳定性，均做过反向验证）：
 
@@ -112,6 +125,18 @@ v1.3 新增（露天判定稳定性，均做过反向验证）：
 | `core/SunExposureCheckerTest#verticalMovementDoesNotRescanOrFlip` | 同一方块列内上下移动（跨 16 格段界）不重扫、判定不翻转 |
 | `core/SunExposureCheckerTest#columnScanCoversBelowEyeHeight` | 扫描必须覆盖整列：高眼位写入的顶遮挡不得让低眼位误判遮蔽 |
 | `core/SunExposureCheckerTest#cacheEntriesAreColumnScoped` | 缓存条目按方块列计，同一列任意眼高只占 1 条 |
+
+v1.3.2 新增（负 Y 露天判定，实机验收驱动）：
+
+| 类 · 方法 | 钉住什么 |
+|---|---|
+| `core/NegativeYExposureRegressionTest#exposedAtNegativeY` | 站在 y=-60、头顶全空、脚下实心 → **必须判露天**（修复前误判遮蔽） |
+| `core/NegativeYExposureRegressionTest#coveredAtNegativeY` | 负 Y 上空有实心顶 → 仍必须判遮蔽（防修过头） |
+| `core/NegativeYExposureRegressionTest#exposedAtWorldBottom` | 世界最低层 y=-63 露天也必须判露天 |
+| `core/NegativeYExposureRegressionTest#exposedAtPositiveY` | 正 Y 区间口径不受影响 |
+| `core/NegativeYExposureRegressionTest#scanStartFollowsWorldMinHeight` | 扫描起点契约：`columnScanStartY(min) == min - 1` |
+
+> 反向验证：把 `columnScanStartY` 改回返回 `-1`，前 3 条立即变红、正 Y 对照仍绿。
 
 v1.2 新增的四个测试类：
 
@@ -589,7 +614,7 @@ tick-interval（≥20 全局任务）
   - **实机复验**（Paper 1.21.11-132 + RCON）：插件启用无异常、启动日志含抗尘埃药装配行、
     `rad dust list/help`、`rad reload` / `--dry-run`、世界内结构（铁砧就位 + 8 邻为
     `#minecraft:logs`）与中心格作物全部核对通过。
-- **v1.3 ✅（本期）**：露天判定稳定性修复（268 条测试全绿）。
+- **v1.3 ✅（本期）**：露天判定稳定性修复（315 条测试全绿）。
   - **根因**：缓存键含眼睛所在的高度段，且扫描起点取该段底 → ① 同一方块列被不同高度段各扫一次、
     结果互相覆盖 → 判定在相邻两轮之间来回切换；② 蹲下/站起/上下台阶跨 16 格段界即换键 →
     重复整列扫描。

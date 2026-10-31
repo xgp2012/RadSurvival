@@ -12,7 +12,7 @@
 
 | 顺序 | 做什么 | 耗时 |
 |---|---|---|
-| 1 | 跑通 `mvn -B clean package`，确认 **268 条全绿** | ~2 min |
+| 1 | 跑通 `mvn -B clean package`，确认 **315 条全绿** | ~2 min |
 | 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
 | 3 | 读 [§3.1 露天判定的缓存与列键](#31-露天判定的缓存与列键v13-改写改判定前必读)，判定抖动的根因都在这里 | 5 min |
 | 4 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
@@ -33,7 +33,7 @@
 | 语言/JDK | Java **21**（`maven.compiler.release=21`） |
 | 构建 | Maven 3.10+，JDK 21（本机验证：`D:\java21`，Azul Zulu 21.0.12.1） |
 | 产物 | 自包含 fat jar，约 1.8 MB，内嵌库已 relocate 到 `com.ft.radsurvival.lib.*` |
-| 测试规模 | **268 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
+| 测试规模 | **315 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
 | NMS | **零依赖**（纯 Bukkit/Paper API） |
 
 **一句话架构**：`config` 解析并校验 → `core` 七单例承载全部纯逻辑 → `RadiationTask` 每
@@ -147,7 +147,7 @@ RadiationTask.run()
 > **恢复分支**。这样「先累后打」的顺序不变，变的只是本轮累积速率取什么值。
 > 任何新增的「免疫 / 免伤」类机制都要自问一句：**累积速率归零了吗？**（详见 §10.4）
 
-### 3.1 露天判定的缓存与列键（v1.3 改写，改判定前必读）
+### 3.1 露天判定的缓存与列键（v1.3 改写 / v1.3.2 修下界，改判定前必读）
 
 `SunExposureChecker` 分三层，改任何一层都要先弄清「缓存的键到底该由哪些轴决定」：
 
@@ -171,8 +171,12 @@ RadiationTask.run()
 
 修复要点：
 - 键去掉 y（`ColumnKey.of(world, x, z)`；三参重载保留为 `@Deprecated`，y 被忽略）；
-- 扫描起点统一取 `columnScanStartY()`（世界底部之下），**不能复用眼高所在的段底**——
+- 扫描起点取 `columnScanStartY(world.getMinHeight())` = `minHeight - 1`，**不能复用眼高所在的段底**——
   否则段底以下、眼位以上的空白会被漏掉，低眼位被误判为遮蔽（**漏判危险**，比误判安全更糟）。
+- **扫描下界必须由世界驱动，不能写死常量**（v1.3.2 踩坑）：曾经写死 `0 - 1 = -1`，理由「1.21
+  世界 y 从 -64 起，0 已在其上」是错的——1.21 主世界 y 范围 `-64..319`，负 Y 是深板岩层/矿洞/
+  竖井/部分出生点的正常可玩区域。停在 -1 等于 `[-64,-1]` 的方块**从未被读过**，无遮挡列返回
+  哨兵 `-2`，判据 `-60 > -2` 为假 → 判「遮蔽」→ 白天不掉血。详见 §10.7。
 
 **通用教训**：任何「按段缓存派生量」的缓存都要问一句——**这个派生量与段的哪些轴真正相关？**
 本处的派生量（顶遮挡高度）只与 x/z 列相关，y 是**查询参数**而不是**键的一部分**。
@@ -305,7 +309,7 @@ src/test/java/com/ft/radsurvival/
 ```powershell
 $env:JAVA_HOME='D:\java21'
 $env:MAVEN_OPTS='-Duser.language=en -Dfile.encoding=UTF-8'   # 避免 GBK 下中文编译错误
-mvn -B clean package            # 全量（268 条）
+mvn -B clean package            # 全量（315 条）
 mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 ```
 
@@ -340,21 +344,35 @@ mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 - 只要碰 Bukkit 事件/PDC/命令，就放 `mockbukkit/` 并用 `Support.install(...)` 统一装配；
 - 「回归钉子」请在注释里写清**钉的是什么 bug**（本仓库历史修复均有此标注）；
 - **回归钉子必须做一次反向验证**：把修复改回去，确认测试变红，再改回来。不做这一步的回归测试
-  有一半是装饰品（§10.5 ①，v1.3 的三条钉子均按此流程验证）。
+  有一半是装饰品（§10.5 ①，v1.3 与 v1.3.2 的钉子均按此流程验证）。
+- **取值分布也要覆盖**：写判定类测试时，除了「正常输入」，必须挑**取值范围的两端**各来一条
+  （坐标的最低/最高、配置的最小/最大、时间的边界）。v1.3.2 的负 Y 漏判就是因为在 18 条眼高
+  用例里**全部 ≥ 64**、没有一条落在负 Y，才在 310 条全绿下漏网。
+- **写死常量的断言要慎用**：断言「扫描了 N 格」「执行了 M 次」这类实现细节时，让它从被测
+  常量**派生**（如 `MAX_HEIGHT - columnScanStartY(MIN_HEIGHT)`），不要把某个具体字面量
+  固化成期望值——否则下界一改，测试反而变成「错误行为的看门人」（v1.3.2 就修过 4 处）。
 
-### 8.4 测试分布（v1.3，共 268 条）
+### 8.4 测试分布（v1.3.2，共 315 条）
 
-| 位置 | 内容 | 特点 |
-|---|---|---|
-| `config/` | `PluginConfigValidationTest`、`PluginConfigFeedbackValidationTest` | 纯 Java，无需服务器；**新增配置键必须在这里加校验断言** |
-| `core/` | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键回归**）、`DustImmunity`、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
-| `feedback/` | `HudRendererTest`（纯字符串渲染） | 新宽字符要进 `WIDE_SYMBOLS` |
-| `listener/` | `SunRadiationListenerTest`（伤害通道归因纯内核） | `classify` 四条件 |
-| `mockbukkit/` | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` | 生产代码路径，除两个注入缝外不 mock |
+按包实测（`mvn -B clean package` 的 Surefire 汇总）：
 
-> **判定类测试的盲区**：`SunExposureCheckerTest` 之外，所有集成测试都用**固定眼高**。
-> v1.3 的两个缺陷正是这样在 265 条全绿的套件里活了一整个版本。
-> 新增判定相关测试时，务必覆盖「同一位置、眼高变化」这一维度。
+| 包 | 条数 | 内容 | 特点 |
+|---|---|---|---|
+| `mockbukkit/` | 138 | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` | 生产代码路径，除注入缝外不 mock |
+| `core/` | 85 | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键 + v1.3.2 负 Y 回归**）、`DustImmunity`、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
+| `config/` | 60 | `PluginConfigValidationTest`、`PluginConfigFeedbackValidationTest` | 纯 Java，无需服务器；**新增配置键必须在这里加校验断言** |
+| `command/` | 13 | `CommandOutputWidthTest`（显示宽度/对齐） | 命令包此前零测试，v1.3.1 补齐 |
+| `feedback/` | 11 | `HudRendererTest`（纯字符串渲染） | 新宽字符要进 `WIDE_SYMBOLS` |
+| `listener/` | 8 | `SunRadiationListenerTest`（伤害通道归因纯内核） | `classify` 四条件 |
+
+> **判定类测试的两类盲区**（各被一个真实缺陷验证过）：
+>
+> 1. **眼高维度**：`SunExposureCheckerTest` 之外，所有集成测试都用**固定眼高**。
+>    v1.3 的两个缺陷正是这样在 265 条全绿的套件里活了一整个版本。
+>    新增判定相关测试时，务必覆盖「同一位置、眼高变化」这一维度。
+> 2. **取值分布**：`SunExposureCheckerTest` 的 18 条用例眼高**全部 ≥ 64**，没有一条落在负 Y，
+>    于是 v1.3.2 的负 Y 漏判在 310 条全绿下漏网。新增判定类测试时先问一句
+>    **「取值范围的另一端测了吗」**——本例只需把一条用例的眼高从 64 改成 -60，就能提前一个版本发现。
 
 ---
 
@@ -371,7 +389,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 > v1.3 起：第 1~4 项已由 CI 的「Verify tests actually ran」与「Verify fat jar self-containment」
 > 两步**自动执行**（push/PR 都会跑）；本清单保留给本地发版前的人工复核。
 
-1. `mvn -B clean package` → `Tests run: 268, Failures: 0, Errors: 0, Skipped: 0`
+1. `mvn -B clean package` → `Tests run: 315, Failures: 0, Errors: 0, Skipped: 0`
 2. 产物大小约 1.8 MB；jar 内 `com/ft/radsurvival/lib/*` ≥ 1259 项；
    `org/spongepowered/*`、`com/github/benmanes/*` **零泄漏**；
 3. 内嵌 `config.yml` 与 `src/main/resources/config.yml` **逐字节一致**；
@@ -722,7 +740,8 @@ static int columnScanStartY(int worldMinHeight) { return worldMinHeight - 1; }
 
 **当前状态**：M1–M4 完成并实机验收；命令层与日志优化已完成并验证；构建混淆已评估并
 **明确放弃**；v1.1 判定链路加固已完成；v1.2 护甲削弱 + 抗尘埃药已完成；
-**v1.3 露天判定稳定性修复已完成（268 条测试全绿）**；
+v1.3 露天判定稳定性修复已完成；v1.3.1 全量缺陷排查（17 项）已完成；
+**v1.3.2 负 Y 露天判定漏判修复已完成（315 条测试全绿，实机复验通过）**；
 CI/CD 自动发行已上线（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
 **产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
@@ -735,7 +754,7 @@ GitHub Releases（唯一发布源）
 本地构建仍产出 `target/RadSurvival.jar`（版本号 `1.0.0-SNAPSHOT`），仅用于自测与实机冒烟。
 `test-server/` **不入库**（世界存档 + 明文凭据），验证脚本在 [tools/](tools/)。
 
-**接手后第一件事**：跑一次 `mvn -B clean package` 确认 268 条全绿。
+**接手后第一件事**：跑一次 `mvn -B clean package` 确认 315 条全绿。
 
 > 文档改动不涉及代码，产物无需重建。
 
@@ -745,7 +764,7 @@ GitHub Releases（唯一发布源）
 |---|---|
 | 伤害数值 / 曲线 | `core/RadiationMath`（纯函数，改完跑 `SurvivalBudgetRegressionTest`） |
 | 判定过滤条件 | `core/RadiationTask` 的过滤链（①~⑦ 链路见 §3） |
-| 露天判定/缓存策略 | `core/SunExposureChecker` + `config.yml` 的 `async-exposure-scan`（v1.3：缓存的键必须是判决真正依赖的轴——顶遮挡只与 x/z 列有关） |
+| 露天判定/缓存策略 | `core/SunExposureChecker` + `config.yml` 的 `async-exposure-scan`（v1.3：缓存的键必须是判决真正依赖的轴——顶遮挡只与 x/z 列有关；v1.3.2：扫描下界必须由 `world.getMinHeight()` 驱动，不能写死常量） |
 | 外部伤害与原版护甲的交互 | `listener/SunRadiationListener`（门控 + `classify`） |
 | 新增配置项 | `config/PluginConfig` + `src/main/resources/config.yml` **两处都要改**，并跑配置校验测试 |
 | 新增子命令 | `command/SubCommand` 枚举 → `RadCommand` 的 `onCommand` / `onTabComplete` |
@@ -924,7 +943,7 @@ GitHub Releases（唯一发布源）
    替换后 `grep` 一遍形似端口或坐标的结果（见 §10.5 ⑤）。
 7. **改缓存/判定逻辑 → 同步 §3.1 与 §10.6**，并在测试里覆盖「同一位置、参数变化」的维度
    （v1.3 的教训：固定参数的测试套件查不出键维度错误）。
-8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 268 条。改完测试务必同步本文 §8.4、
+8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 315 条。改完测试务必同步本文 §8.4、
    发布检查单、ADVANCED §2.3 与 ACCEPTANCE 对应小节——历史上这里就漂移过（265 vs 267）。
 
 > **文档里的相对链接请检查锚点**：GitHub 把标题转锚点时**会去掉点号**，
