@@ -4,7 +4,7 @@
 > [ADVANCED.md](ADVANCED.md)，设计规格与决策记录看 [plan.md](plan.md)，实机验收证据看
 > [ACCEPTANCE.md](ACCEPTANCE.md)。
 >
-> 最后更新：2026-10-27（§3.1 露天判定缓存与列键、§10.6 v1.3 判定稳定性修复、§8.4 测试分布）
+> 最后更新：2026-11-23（§10.9 v1.4.1 制药台结构简化、§8.4 测试分布 333 条、§13.1 改结构配方）
 
 ---
 
@@ -12,7 +12,7 @@
 
 | 顺序 | 做什么 | 耗时 |
 |---|---|---|
-| 1 | 跑通 `mvn -B clean package`，确认 **332 条全绿**（JDK 21，见 §12 警告） | ~2 min |
+| 1 | 跑通 `mvn -B clean package`，确认 **333 条全绿**（JDK 21，见 §12 警告） | ~2 min |
 | 2 | 读 [§3 一轮结算的完整链路](#3-一轮结算的完整链路)，这是全插件的主动脉 | 5 min |
 | 3 | 读 [§3.1 露天判定的缓存与列键](#31-露天判定的缓存与列键v13-改写-v132-修下界改判定前必读)，判定抖动的根因都在这里 | 5 min |
 | 4 | 读 [§10 已知问题与踩坑](#10-已知问题与踩坑记录)，避开历史真实故障 | 10 min |
@@ -20,6 +20,7 @@
 | 6 | 想动手时查 [§13 扩展点速查](#13-扩展点速查按需求找位置) | 随时 |
 | 7 | **要改既有逻辑前**，先看 [§10.5 排查方法论](#105-v12-排查方法论怎么把看起来没问题的代码查出洞) | 8 min |
 | 8 | 要碰「服务端检测 / 拒绝加载 / 调度」类代码，加读 [§10.8.1 单测全绿 ≠ 代码被走到过](#1081-单测全绿-那段代码被走到过folia-死代码) 与 [PLATFORMS.md](PLATFORMS.md) | 8 min |
+| 9 | 要改**抗尘埃药的合成结构**（世界多方块），读 [§10.9](#109-v141-制药台结构简化为竖列三格需求变更类改动的注意点)（改结构要连带同步 5 处文档 + 2 处运行期文案 + 存量建筑迁移指引） | 5 min |
 
 > **最容易被忽略的一条**：本插件的伤害数字**不是**靠 `DamageType` 区分的，
 > 而是靠「结算瞬间摘掉盔甲 + 时间窗标记」这套机制。看到相关代码觉得绕，先读 §4.2。
@@ -38,7 +39,7 @@
 | 语言/JDK | Java **21**（`maven.compiler.release=21`） |
 | 构建 | Maven 3.10+，JDK 21（本机验证：`D:\java21`，Azul Zulu 21.0.12.1） |
 | 产物 | 自包含 fat jar，约 1.8 MB，内嵌库已 relocate 到 `com.ft.radsurvival.lib.*` |
-| 测试规模 | **332 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
+| 测试规模 | **333 条**（纯内核 + MockBukkit 集成），全绿、无跳过 |
 | NMS | **零依赖**（纯 Bukkit/Paper API） |
 
 **一句话架构**：`config` 解析并校验 → `core` 七单例承载全部纯逻辑 → `RadiationTask` 每
@@ -73,9 +74,9 @@ com.ft.radsurvival
 │   ├── RadiationTask      主循环：过滤链 → 判定 → 腐蚀步进 → 免疫 → 伤害
 │   ├── PlayerRadState     单玩家结算镜像（HUD/调试读口）
 │   └── RadiationServices  七单例容器（reload 时整体重建）
-├── item/                  ★ 抗尘埃药（v1.2）
+├── item/                  ★ 抗尘埃药（v1.2；结构于 v1.4.1 简化为竖列三格）
 │   ├── DustItemFactory    物品构建 + PDC 档位标识 + 档位反查
-│   ├── DustCraftStructure 多方块结构判定（铁砧 + 发射器 + 铁块，竖列三格）
+│   ├── DustCraftStructure 多方块结构判定（上铁砧 + 中发射器 + 下铁块）★只读纯函数，无状态
 │   └── DustCraftGui       ★ 合成界面与触发（木棍右键铁砧 / 容器使用约束）
 ├── feedback/              表现层
 │   ├── FeedbackService     HUD 双条 / 阶段播报 / 粒子音效 / BossBar（兼作受击监听器）
@@ -314,7 +315,7 @@ src/test/java/com/ft/radsurvival/
 ```powershell
 $env:JAVA_HOME='D:\java21'
 $env:MAVEN_OPTS='-Duser.language=en -Dfile.encoding=UTF-8'   # 避免 GBK 下中文编译错误
-mvn -B clean package            # 全量（332 条）
+mvn -B clean package            # 全量（333 条）
 mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
 ```
 
@@ -377,13 +378,13 @@ mvn -B test -Dtest=RadCommandMockBukkitTest   # 单类
   但实际永不执行，那它比没有更糟——后来者会相信它。因此文档里描述防御分支时，
   请写明验证**达到哪一层**（单测/集成/真机），不要一律写「已验证」。
 
-### 8.4 测试分布（v1.4.0，共 332 条）
+### 8.4 测试分布（v1.4.1，共 333 条）
 
 按包实测（`mvn -B clean package` 的 Surefire 汇总；**须在 JDK 21 下跑**，见 §12）：
 
 | 包 | 条数 | 内容 | 特点 |
 |---|---|---|---|
-| `mockbukkit/` | 141 | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` / 品牌接线 | 生产代码路径，除注入缝外不 mock |
+| `mockbukkit/` | 142 | `RadiationTask` / 命令层 / 事件链 / reload / 会话生命周期 / 抗尘埃药全链路 / `Support` / 品牌接线 | 生产代码路径，除注入缝外不 mock |
 | `core/` | 99 | `RadiationMath`（纯函数）、`DayNightProvider`、`ArmorCalculator`、`CorrosionMeter`、`SunExposureChecker`（**含 v1.3 列键 + v1.3.2 负 Y 回归**）、`DustImmunity`、`ServerBrand`（v1.4 识别与防御方向，含隔离类加载验证）、`SurvivalBudgetRegressionTest` | 最快、最该优先扩充 |
 | `config/` | 60 | `PluginConfigValidationTest`、`PluginConfigFeedbackValidationTest` | 纯 Java，无需服务器；**新增配置键必须在这里加校验断言** |
 | `command/` | 13 | `CommandOutputWidthTest`（显示宽度/对齐） | 命令包此前零测试，v1.3.1 补齐 |
@@ -414,7 +415,7 @@ mvn -B clean package -Plibraries-channel   # thin jar + plugin.yml libraries:（
 > v1.3 起：第 1~4 项已由 CI 的「Verify tests actually ran」与「Verify fat jar self-containment」
 > 两步**自动执行**（push/PR 都会跑）；本清单保留给本地发版前的人工复核。
 
-1. `mvn -B clean package` → `Tests run: 332, Failures: 0, Errors: 0, Skipped: 0`
+1. `mvn -B clean package` → `Tests run: 333, Failures: 0, Errors: 0, Skipped: 0`
 2. 产物大小约 1.8 MB；jar 内 `com/ft/radsurvival/lib/*` ≥ 1259 项；
    `org/spongepowered/*`、`com/github/benmanes/*` **零泄漏**；
 3. 内嵌 `config.yml` 与 `src/main/resources/config.yml` **逐字节一致**；
@@ -855,6 +856,43 @@ ACCEPTANCE §M 与 ADVANCED §12.1 的支持矩阵表与此严格一致。
 **跨分支冒烟**：`test-servers/run-smoke.ps1`（每分支独立目录/端口/JVM，RCON 校验 `platform` 行）。
 结论见 ACCEPTANCE §M。**新增 Paper 分支支持声明前，先跑它。**
 
+### 10.9 v1.4.1 制药台结构简化为竖列三格（需求变更类改动的注意点）
+
+用户要求把「发射器 + 上方铁砧 + 同层 8 邻原木」的 3×3 平面结构，改成竖着叠的三格。
+这次改动**没有缺陷**，但有几处只有做过一遍才知道的地方，记下来：
+
+| 坑 | 事实与结论 |
+|---|---|
+| **结构变更首先是一次「公共 API 变更」** | `DustCraftStructure.validate` 是 `public` 且被两个测试类直接调用。改签名（2 参 → 3 参）会让**测试编译失败**——这是好事，编译错误把「哪些地方依赖旧口径」全指出来了。不要为了「保持兼容」保留旧重载：一个判 2 格、一个判 3 格的重载会让后来者误用，而结构只有一种定义 |
+| **删常量要连带删它的使用者** | `RING_FACES` 被 `inspect()`、`AntiDustChainMockBukkitTest`、`BugHuntRegressionTest`、`DustCraftStructureMockBukkitTest` 四处引用。删常量后**必须**把这三个测试夹具从「核心 + 上方铁砧 + 一圈原木」改成「核心 + 上方铁砧 + 下方铁块」，否则测试会以一种很奇怪的方式失败（在 `buildStructure` 里就红了，看不出与结构规则的关系） |
+| **`isWood()` 留着比删掉更安全** | 它已不参与生产判定，但仍被 `DustCraftStructureMockBukkitTest` 引用（`Tag.LOGS` 口径是有价值的既有断言）。**保留 + javadoc 注明「生产路径不再调用」**，比删掉后让引用方各自复制一份 `Tag.LOGS` 判断要好。判据：删掉会不会迫使别人重复实现同一个纯函数 |
+| **「失败诊断」是结构变更里最容易漏的一半** | 旧诊断会报「外围一圈必须全是原木，缺少：EAST=…」；新结构必须在 `validate` 里加上「正下方必须是铁块（当前：XXX）」这条。玩家搭错时看到的第一句话就是诊断，**结构改了而诊断没改 = 玩家永远不知道自己错在哪**。测试要断言诊断**点名了具体方块类型**，不只是 `isFalse()` |
+| **新增结构约束要检查「旧存档/旧搭建」的过渡** | 存量服务器上已经摆好的制药台会**直接失效**（下方是空气/泥土，不是铁块）。这类变更必须在 CHANGELOG 的「升级注意」里写清**修哪一格**（本例：保留铁砧与发射器，只在发射器正下方补一块铁块），而不是笼统写「结构已变更」 |
+| **测试夹具比测试断言更容易腐化** | 三个测试类各有自己的 `buildStructure`。结构一改，三个夹具都要动，但**只有断言会告诉你改对了没**——夹具改错时测试可能变绿（比如忘了摆铁块、而恰好没有一条用例检查「结构成立」）。改夹具后**先跑一遍全量**，确认条数没变（333）而不是只跑单个类 |
+| **文档里的结构描述分布在 5 个地方** | README 的搭法+ASCII 图、ADVANCED §3.4 与排错表、DEVELOPMENT 包树与 §10.4、ACCEPTANCE 结构核对表、`config.yml` 段落注释，外加启动日志与 `/rad dust help` 两处**运行期文案**。改结构时逐处对照，**运行期文案最容易被忘**（玩家看不见文档，只看得到 action bar 和 help 输出） |
+| **PowerShell 批量替换会毁掉中文编码** | 本次想用 `(Get-Content -Raw) -replace '332 条','333 条' \| Set-Content` 批量改测试基数，结果**整份文档的中文全部变成乱码**（`Set-Content` 默认按 ANSI/GBK 写回，而源文件是 UTF-8）。`git checkout` 恢复后改用逐处编辑。**结论：中文文档一律不批量替换**，用编辑工具点名改；非要脚本化就必须显式 `-Encoding utf8` 并在替换后校验首行中文 |
+
+**这次改动「为什么没有缺陷」**：结构判定是纯函数、只读、无状态，改动边界清楚（读两格变读三格），
+且不在结算链路上——所以没有 v1.1/v1.2 那种「承诺与实现不符」的空间。
+判断一次改动风险高低，可以先问：**它碰了「先累后打」「无敌帧」「不双重减免」这三条里的任何一条吗？**
+没碰，就基本不会有隐性缺陷；碰了，就必须按 §10.5 的清单走一遍。
+
+**验证记录（做到哪一层，如实标注）**：
+
+| 层 | 结论 |
+|---|---|
+| 纯函数层（`DustCraftStructureMockBukkitTest` 12 条） | ✅ 通过。`isBase` 只认 `IRON_BLOCK`；三类问题（核心不对/缺铁砧/缺铁块）一次性全报 |
+| 真实方块层（`AntiDustChainMockBukkitTest#structureRecognition`） | ✅ 通过。三格齐全→成立；拆上方铁砧→不成立；拆下方铁块→不成立**且诊断点名 `AIR`**；`STONE` 同样被拒；东侧从 `OAK_LOG` 改 `AIR` 仍成立（**这条是「原木环已移除」的钉子**） |
+| 端到端（`craftProducesPotion` 等） | ✅ 通过。敲铁砧→出药、作物 −1、木棍不消耗、档位正确 |
+| 全量回归 | ✅ `Tests run: 333, Failures: 0, Errors: 0, Skipped: 0`（JDK 21） |
+| jar 内容一致性 | ✅ 内嵌 `config.yml` 与 `src/main/resources/config.yml` **SHA-256 逐字节相同**（`84CBE33A…C354B`），新注释确实进了产物 |
+| 真实客户端搭建 + 敲击 | ❌ **未做**（本环境无 1.21.11 客户端，同 §10.8.3 的「未实测就是未实测」口径） |
+
+> **没有做反向验证的地方，也要写清**：本次是**需求变更**而非缺陷修复，没有「把 bug 改回去」
+> 这个动作可做。替代做法是上面的「契约钉子」——例如「东侧改 AIR 仍成立」这条，
+> 只要把 `validate` 改回带环校验就会立刻变红（我在改夹具时正是靠它确认原木环真的不再参与判定）。
+> 这与 §8.3「回归钉子必须反向验证」的要求**不等价**，文档里不要混为一谈。
+
 ---
 
 ## 11. 后续方向（plan.md 文末候选）
@@ -874,6 +912,7 @@ ACCEPTANCE §M 与 ADVANCED §12.1 的支持矩阵表与此严格一致。
 **明确放弃**；v1.1 判定链路加固已完成；v1.2 护甲削弱 + 抗尘埃药已完成；
 v1.3 露天判定稳定性修复已完成；v1.3.1 全量缺陷排查（17 项）已完成；
 **v1.3.2 负 Y 露天判定漏判修复已完成**；**v1.4.0 品牌识别与防御分支已完成（332 条测试全绿）**；
+**v1.4.1 制药台结构改为竖列三格已完成（333 条测试全绿）**；
 CI/CD 自动发行已上线（`RadSurvival-<年>-<月>-<日>-<序号>.jar`）。
 
 **产物从哪里拿**：CI/CD 上线后**以 Release 为准**，不要再用本地目录当发布源。
@@ -887,7 +926,7 @@ GitHub Releases（唯一发布源）
 `test-server/`（单服验收）与 `test-servers/`（跨分支冒烟，v1.4 新增）都**不入库**，
 验证脚本在 [tools/](tools/) 与 [test-servers/](test-servers/)。
 
-**接手后第一件事**：跑一次 `mvn -B clean package` 确认 332 条全绿。
+**接手后第一件事**：跑一次 `mvn -B clean package` 确认 333 条全绿。
 
 > ⚠️ **必须用 JDK 21**：本机若默认 JDK 是 25，MockBukkit 的 127 条用例会以
 > `NullPointerException: No jar file selected` 全体报错（`MockBukkitConfiguredPluginClassLoader`
@@ -952,7 +991,8 @@ GitHub Releases（唯一发布源）
 | 加对外事件 | `api/` 包 | 只加不改，保持二进制兼容 | `RadiationExposureEventChainTest` |
 | 改抗尘埃药档位/作物 | `config.yml` 的 `anti_dust.levels` | 档位顺序即优先级，重复作物会拒载 | `PluginConfigValidationTest` + `AntiDustChainMockBukkitTest` |
 | 加一个新的「自制物品」 | `item/` 包（照 `DustItemFactory`） | 基底材质 + PDC 标识 + 组件；**不能造新 ID** | 物品工厂测试（PDC 往返 / 组件存在） |
-| 加一个新的多方块结构 | `item/` 包（照 `DustCraftStructure`） | 纯 `Material` 判定与真实方块读取要分两层 | 必须放 `mockbukkit/`（Tag 需注册表） |
+| 加一个新的多方块结构 | `item/` 包（照 `DustCraftStructure`） | 纯 `Material` 判定与真实方块读取要分两层；**改结构必须同时改诊断文案**（见 §10.9） | 必须放 `mockbukkit/`（Tag 需注册表） |
+| **改既有多方块结构**（v1.4.1） | `DustCraftStructure.validate` + `inspect` | README 搭法/ASCII 图、ADVANCED §3.4+排错表、DEVELOPMENT 包树+§10.4、ACCEPTANCE 核对表、`config.yml` 注释、**启动日志与 `/rad dust help` 两处运行期文案**、CHANGELOG「升级注意」里写清存量建筑怎么改 | `DustCraftStructureMockBukkitTest` + 三个测试类的 `buildStructure` 夹具；改完跑**全量**确认条数 |
 
 ### 13.2 可直接注入的测试缝
 
@@ -1099,7 +1139,7 @@ GitHub Releases（唯一发布源）
    替换后 `grep` 一遍形似端口或坐标的结果（见 §10.5 ⑤）。
 7. **改缓存/判定逻辑 → 同步 §3.1 与 §10.6**，并在测试里覆盖「同一位置、参数变化」的维度
    （v1.3 的教训：固定参数的测试套件查不出键维度错误）。
-8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 332 条。改完测试务必同步本文 §8.4、
+8. **文档里的测试条数以 `mvn` 实际输出为准**：当前 333 条。改完测试务必同步本文 §8.4、
    发布检查单、ADVANCED §2.3 与 ACCEPTANCE 对应小节——历史上这里就漂移过（265 vs 267）。
 9. **★ 写「已验证」时必须写明验证层级**（v1.4 新增）。同一个词在不同层级含义完全不同：
 

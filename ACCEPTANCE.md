@@ -8,7 +8,7 @@
 
 | 项 | 结论 | 证据位置 |
 |---|---|---|
-| 全量构建与测试 | ✅ **315 条测试，0 失败 0 错误 0 跳过**（v1.1 时 188 → v1.2 265 → v1.3 268 → v1.3.1 310 → v1.3.2 **315** — 见 §K、§L） | §A、§J.1、§K、§L.2 |
+| 全量构建与测试 | ✅ **333 条测试，0 失败 0 错误 0 跳过**（v1.1 时 188 → v1.2 265 → v1.3 268 → v1.3.1 310 → v1.3.2 315 → v1.4.0 332 → v1.4.1 **333** — 见 §K、§L、§N） | §A、§J.1、§K、§L.2、§N.1 |
 | 插件实机加载 | ✅ 启用成功、零异常、零 libraries 下载 | §B.1 |
 | `libraries:` 通道风险 | ⚠️ **本环境不可用（Connection reset）→ 已切默认 shade+relocate，thin 通道保留可切换** | §B.2 |
 | 配置生成与校验 | ✅ 与仓库默认逐字节一致；坏配置 reload 拒载并保留旧配置 | §B.3–B.4 |
@@ -18,6 +18,8 @@
 | 玩家相关验收（HUD/播报/腐蚀保留/预算表计时等） | ✅ 已用真实 1.21.11 客户端跑通关键链路（露天结算、腐蚀累加、死亡文案、reload 续接）；逐项秒表计时仍可照 §D 复跑 | §D |
 | **v1.2 护甲削弱 + 抗尘埃药**（265 条测试） | ✅ 构建/启动/命令/世界结构全通过；交互类（木棍右键、GUI 点击、服药动画）由 MockBukkit 生产路径覆盖，建议上线前手工复跑 | §J |
 | **v1.3.2 负 Y 露天判定**（315 条测试） | ✅ **真实客户端实机复验通过**：修复前报「遮蔽安全」，修复后报「露天」并正常累积腐蚀/结算伤害；上表四项数值全部逐位吻合 | §L |
+| **v1.4.0 品牌识别与防御**（332 条测试） | ✅ Paper/Leaf 放行、Folia 拒绝加载（真实服务端验证）；Spigot 仅隔离类加载、Purpur 未实测，口径保持「未实测」 | §M |
+| **v1.4.1 制药台结构简化**（333 条测试） | ⚠️ **构建/测试通过，实机结构判定待复验**：结构规则改由 MockBukkit 真实方块链路覆盖（`structureRecognition` 覆盖「拆下方铁块 → 失败且点名」），新结构在真实客户端上的搭建/敲击手感建议上线前手工复跑 | §N |
 
 ## A. 全量构建与测试
 
@@ -35,8 +37,8 @@ $env:JAVA_HOME='D:\java21'; mvn -B clean package
 - 环境：JDK 21（Azul Zulu 21.0.12.1，`D:\java21`）、Maven 3.10.0、paper-api 1.21.11-R0.1-SNAPSHOT。
 
 > 上为**首轮验收（v1.1 时期）**的历史快照，保留以对照。最新全量结果为
-> **`Tests run: 315, Failures: 0, Errors: 0, Skipped: 0`**（v1.3.2，见 §L.2）；
-> 各版本测试规模演进 188 → 265 → 268 → 310 → **315**。
+> **`Tests run: 333, Failures: 0, Errors: 0, Skipped: 0`**（v1.4.1，见 §N.1）；
+> 各版本测试规模演进 188 → 265 → 268 → 310 → 315 → 332 → **333**。
 
 ## B. 实机冒烟（Paper 1.21.11 build 132，offline + RCON）
 
@@ -640,6 +642,50 @@ Leaf 上 `平台 · Leaf（server.getName()：getName=Leaf）` —— 走的是*
 **结论**：Purpur 的识别与加载**未经实测**，文档中维持「Paper 分支，理论可用，未实测」表述。
 补齐方法：在能正常访问 purpurmc.org 的机器上跑
 `test-servers/run-smoke.ps1 -Server purpur`（脚本已备好，只需放入 jar）。
+
+---
+
+## N. v1.4.1 制药台结构简化（构建与测试验收）
+
+> 验收日期：2026-11-23（Asia/Shanghai）
+> 变更：结构由「发射器 + 上方铁砧 + 同层 8 邻原木」改为「最上铁砧 + 中间发射器 + 最下铁块」竖列三格。
+
+### N.1 构建与测试
+
+```
+$env:JAVA_HOME='D:\java21'; mvn -B clean package
+[INFO] Tests run: 333, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+[INFO] Building jar: D:\code\FT\target\RadSurvival.jar   （1,845 KB）
+```
+
+- 环境：JDK 21（`D:\java21`）、Maven 3.10.0。
+- **必须在 JDK 21 下跑**：系统默认 JDK 25 时 `mockbukkit` 包 130 条用例全体报
+  `NullPointerException: No jar file selected`（构建期缺陷，与本次改动无关，见 ADVANCED §2.3）。
+
+### N.2 结构判定的替代证据（MockBukkit 真实方块）
+
+| 检查项 | 证据 |
+|---|---|
+| 三格齐全 → 成立 | `AntiDustChainMockBukkitTest#structureRecognition`：发射器 + 上方 `ANVIL` + 下方 `IRON_BLOCK` → `inspect().ok() == true` |
+| 拆上方铁砧 → 不成立 | 同上，`anvil.setType(AIR)` 后 `ok() == false`，装回即恢复 |
+| 拆下方铁块 → 不成立且**点名方块** | 同上，`summary()` 含「正下方必须是铁块」与 `AIR`；`STONE` 同样被拒 |
+| 水平方向**不再参与**判定 | 同上，东侧从 `OAK_LOG` 改 `AIR` 后仍 `ok() == true`（旧版此处会失败） |
+| 投掷器等价 | 同上，`buildStructure(DROPPER)` → `ok() == true` |
+| 纯函数层（不触方块） | `DustCraftStructureMockBukkitTest`（12 条）：`isBase` 只认 `IRON_BLOCK`、三类问题一次性报出、`validate` 无环参数 |
+| 端到端仍是「敲铁砧 → 出药」 | `AntiDustChainMockBukkitTest#craftProducesPotion`：作物 −1、木棍不消耗、档位正确 |
+
+### N.3 未做的事（如实记录）
+
+| 项 | 状态 | 原因 / 补齐方式 |
+|---|---|---|
+| 真实客户端搭建新结构并敲铁砧 | **未复验** | 本环境无可用 1.21.11 客户端（与 §J.5 同一限制）。结构判定本身是纯只读函数、不碰结算链路，风险集中在「玩家手感」；上线前建议手工搭一次三格竖列并右键铁砧 |
+| 诊断文案的实际观感 | **未复验** | 文案由 action bar 呈现，MockBukkit 只能断言字符串内容。`/rad dust help` 可在实机一眼核对 |
+| 存量制药台的迁移体验 | **未复验** | 旧结构（8 邻原木）会直接失效。玩家需拆环、在发射器正下方补铁块；建议在服务器公告里写清这一格 |
+
+> **教训（与 §10.9 同源）**：结构变更的风险不在判定数学，而在**五处文档 + 两处运行期文案**的同步，
+> 以及**存量建筑**的迁移指引。前者漏一处就出现「文档说三格、help 说一圈原木」的矛盾；
+> 后者漏了，升级当天玩家会以为插件坏了。
 
 
 

@@ -35,7 +35,7 @@ Minecraft **Paper 1.21.11** 的辐射生存插件。太阳成了敌人，暴露�
 服务器起来后，控制台会出现四行摘要：
 
 ```
-[RadSurvival] 抗尘埃药 · 4 个档位（refined/strong/improved/crude）· 冷却 20s · 结构 = 发射器 + 上方铁砧 + 一圈原木，木棍右键铁砧出品
+[RadSurvival] 抗尘埃药 · 4 个档位（refined/strong/improved/crude）· 冷却 20s · 结构 = 铁砧 + 发射器 + 铁块（竖列三格），木棍右键铁砧出品
 [RadSurvival] 已启用 · tick=20 base=1 night×0.5 worlds=[world] dim=[NORMAL] 腐蚀=on max×2 async=on armor≤72%
 [RadSurvival] 反馈层 · HUD=actionbar 粒子=WHITE_SMOKE 音效=on 死亡文案=on 红闪抑制=off
 [RadSurvival] 接线 · 监听器 7 个（会话/标记/伤害门控/反馈/死亡文案/抗尘埃药），在线玩家 0 名已预填
@@ -280,7 +280,7 @@ Windows 控制台是 GBK 编码，插件输出 UTF-8。这只影响控制台显�
 | 依赖 | 无（ProtocolLib / PlaceholderAPI 可选） |
 | 大小 | 约 1.8 MB（自包含，内嵌库已重定位） |
 | NMS | 不使用 |
-| 测试 | 332 条自动化测试 |
+| 测试 | 333 条自动化测试 |
 
 每次推送到主分支都会自动构建并跑完整测试，发布前还有门禁——测试数量异常会直接中止发布，
 避免坏包流出去。构建产物命名格式是 `RadSurvival-<年>-<月>-<日>-<当天第几次构建>.jar`，

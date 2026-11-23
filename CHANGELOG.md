@@ -10,7 +10,7 @@
 
 ## [未发布]
 
-### v1.4.1 — 制药台结构改为竖列三格（进行中）
+### v1.4.1 — 制药台结构改为竖列三格（待发版）
 
 #### 变更
 
@@ -34,9 +34,17 @@
 
 #### 测试
 
-- `DustCraftStructureMockBukkitTest` 由 11 → 12 条（新增 `isBase` 与「缺铁块」诊断、去掉环相关断言）；
-- `AntiDustChainMockBukkitTest` / `BugHuntRegressionTest` 的夹具改为搭三格竖列；
-- 全量 333 条测试在 JDK 21 下全绿。
+- `DustCraftStructureMockBukkitTest` 由 11 → 12 条（新增 `isBase` 与「缺铁块」诊断、去掉环相关断言，
+  并锁住「水平方向不参与判定」这一契约）；
+- `AntiDustChainMockBukkitTest` / `BugHuntRegressionTest` 的 `buildStructure` 夹具改为搭三格竖列；
+  `structureRecognition` 现在验「拆下方铁块 → 失败且诊断点名」，并额外断言「拆东侧方块照样成立」；
+- 全量 **332 → 333 条**测试在 JDK 21 下全绿（`Tests run: 333, Failures: 0, Errors: 0, Skipped: 0`）。
+
+#### 未验证
+
+- 真实客户端上的搭建与「木棍右键铁砧」手感**未复验**（本环境无可用 1.21.11 客户端，
+  同 §J.5 限制）。结构判定由 MockBukkit 真实方块链路覆盖，详见
+  [ACCEPTANCE.md](ACCEPTANCE.md) §N。
 
 ---
 

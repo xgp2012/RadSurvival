@@ -95,7 +95,7 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 > `-Plibraries-channel` 产 thin jar（111 KB），两者 plugin.yml 由构建 profile 自动切换。
 
 > **构建环境提示**：远程仓库偶发 socket 挂起（与代码无关，与 ProtocolLib/PAPI 同源问题）。
-> 依赖已齐时用 `mvn -o -B clean package` 离线构建（332 条测试离线全绿）。
+> 依赖已齐时用 `mvn -o -B clean package` 离线构建（333 条测试离线全绿）。
 
 > **依赖仓库实况（2026-10-18 实测）**：extendedclip→PAPI 2.12.3 pom/jar 可拉（极慢，~5–13KB/s）；
 > dmulloy2→ProtocolLib 5.3.0 pom/元数据可拉但 jar 通道挂死——本地 `.m2` 已用**官方 GitHub Release
@@ -104,10 +104,11 @@ mvn -o -B clean package                            # 离线构建（依赖已缓
 
 ### 2.3 测试
 
-当前测试规模：**332 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
+当前测试规模：**333 条全绿**（M1 校验 20 + M2a 纯内核 61 + M2b MockBukkit 集成 48 +
 M3 反馈层 38 + M4 判定链路强化 3 + 露天判定异步化 3 + 命令层优化 4 + v1.1 判定链路加固 11 +
 v1.2 抗尘埃药与护甲削弱 43 + v1.3 露天判定稳定性 3 + **v1.3.1 全量缺陷排查 42** +
-**v1.3.2 负 Y 露天判定 5** + **v1.4.0 品牌识别与防御 14 + 隔离类加载 3**；
+**v1.3.2 负 Y 露天判定 5** + **v1.4.0 品牌识别与防御 14 + 隔离类加载 3** +
+**v1.4.1 制药台结构简化 1**；
 `com.ft.radsurvival.mockbukkit` 与 `com.ft.radsurvival.listener` 包），无跳过项。
 
 > ⚠️ **跑测试必须用 JDK 21**。若系统默认 JDK 是 25，`mockbukkit` 包的 127 条用例会全体报
@@ -118,13 +119,13 @@ v1.2 抗尘埃药与护甲削弱 43 + v1.3 露天判定稳定性 3 + **v1.3.1 �
 
 | 包 | 条数 |
 |---|---|
-| `mockbukkit`（集成，走生产代码路径） | 141 |
+| `mockbukkit`（集成，走生产代码路径） | 142 |
 | `core`（纯内核） | 99 |
 | `config`（纯 Java 校验） | 60 |
 | `command`（渲染与路由） | 13 |
 | `feedback`（纯字符串渲染） | 11 |
 | `listener`（伤害通道归因） | 8 |
-| **合计** | **332** |
+| **合计** | **333** |
 
 v1.3 新增（露天判定稳定性，均做过反向验证）：
 
@@ -684,3 +685,15 @@ tick-interval（≥20 全局任务）
   - **测试**：315 → 332（`ServerBrandTest` 11 + `ServerBrandWiringMockBukkitTest` 3 +
     `ServerBrandSpigotIsolatedTest` 3），反向验证共 4 项，记录见 [CHANGELOG.md](CHANGELOG.md) v1.4.0。
   - **升级**：`config.yml` 无任何变更，直接覆盖 jar 即可。
+- **v1.4.1 ✅（本期）**：制药台结构简化为竖列三格（333 条测试全绿）。
+  - **变更**：抗尘埃药合成结构由「发射器 + 上方铁砧 + 同层 8 邻原木」改为
+    **最上铁砧 → 中间发射器/投掷器 → 最下铁块**；四个水平方向放什么方块都不再参与判定，
+    占地从 3×3 缩到 1×1。
+  - **未改**：任何玩法数值、档位表、作物归属、冷却、免疫时长、物品 PDC、命令与权限。
+    已产出的药水照常可用。
+  - **诊断**：缺上方铁砧 / 缺下方铁块都会在 action bar 点名具体方块类型；
+    `/rad dust help` 与启动摘要同步为三格描述。
+  - **测试**：332 → 333（`DustCraftStructureMockBukkitTest` 11 → 12，
+    新增 `isBase` 与「缺铁块」诊断断言；三个测试类的 `buildStructure` 夹具改为三格竖列）。
+  - **升级注意**：**存量制药台会失效**。保留铁砧与发射器，在发射器**正下方补一块铁块**，
+    并拆掉原来那一圈原木即可。
